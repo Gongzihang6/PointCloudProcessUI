@@ -1,0 +1,140 @@
+/* 全局设定 */
+QWidget {
+    font-family: 'Segoe UI', 'Microsoft YaHei';
+    font-size: 13px;
+    color: #303133;
+}
+
+/* 主背景 */
+QMainWindow {
+    background-color: #f0f2f5;
+}
+
+/* 面板背景 */
+QFrame#Panel {
+    background-color: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+}
+
+/* 按钮样式 */
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    padding: 6px 12px;
+    min-height: 20px;
+}
+QPushButton:hover {
+    border-color: #409eff;
+    color: #409eff;
+    background-color: #ecf5ff;
+}
+QPushButton#PrimaryBtn {
+    background-color: #409eff;
+    color: white;
+    border: none;
+}
+QPushButton#PrimaryBtn:hover {
+    background-color: #66b1ff;
+}
+
+/* 输入框 */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    border: 1px solid #dcdfe6;
+    border-radius: 3px;
+    padding: 3px;
+    min-height: 20px;
+    background: #fafafa;
+}
+QLineEdit:focus, QComboBox:focus {
+    border-color: #409eff;
+}
+
+/* 左侧导航栏按钮 */
+QToolButton#NavBtn {
+    background-color: rgba(255,255,255,0.08);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 20px;
+    padding: 10px;
+}
+QToolButton#NavBtn:hover {
+    background-color: rgba(255,255,255,0.2);
+}
+QToolButton#NavBtn:checked {
+    background-color: #409eff;
+}
+
+/* === 特殊按钮样式 === */
+/* 橙色警告按钮 (用于 AI 推理) */
+QPushButton#WarningBtn {
+    background-color: #e6a23c;
+    color: white;
+    border: none;
+    font-weight: bold;
+}
+QPushButton#WarningBtn:hover {
+    background-color: #ebb563;
+}
+
+/* 绿色成功按钮 (可选) */
+QPushButton#SuccessBtn {
+    background-color: #67c23a;
+    color: white;
+    border: none;
+}
+
+/* === 切换开关容器 (Toggle Switch) === */
+QFrame#ToggleContainer {
+    background-color: #eaeff5;
+    border-radius: 4px;
+    padding: 2px;
+}
+
+/* 切换按钮 (模拟 Segmented Control) */
+QPushButton#ToggleBtn {
+    background-color: transparent;
+    border: none;
+    border-radius: 3px;
+    color: #606266;
+    font-size: 11px;
+}
+QPushButton#ToggleBtn:checked {
+    background-color: #ffffff;
+    color: #409eff;
+    font-weight: bold;
+    /* Qt 样式表不支持 box-shadow，用 border 模拟一点立体感 */
+    border: 1px solid #dcdfe6; 
+}
+
+/* === 关键点状态徽章 (KpBadge) === */
+QLabel#KpBadge {
+    background-color: #f4f4f5;
+    border: 1px solid #e9e9eb;
+    color: #909399;
+    border-radius: 3px;
+    padding: 4px;
+    font-size: 11px;
+    qproperty-alignment: AlignCenter;
+}
+
+/* 关键点被检测到的状态 (绿色) */
+/* 注意：我们需要在 C++ 代码中设置属性 setProperty("detected", true) */
+QLabel#KpBadge[detected="true"] {
+    background-color: #f0f9eb;
+    border: 1px solid #c2e7b0;
+    color: #67c23a;
+    font-weight: bold;
+}
+
+/* === 矩阵输入框 === */
+QTextEdit#MatrixEditor {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 11px;
+    color: #333;
+    background-color: #f8f9fa;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+}
