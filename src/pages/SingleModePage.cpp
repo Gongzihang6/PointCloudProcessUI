@@ -25,6 +25,7 @@
 #include <QPixmap>
 #include <QIcon>
 #include <QColor>
+#include <QDoubleSpinBox>
 
 
 SingleModePage::SingleModePage(QWidget *parent) : QWidget(parent) {
@@ -248,7 +249,29 @@ void SingleModePage::initRightPanel() {
         l->addLayout(row);
     };
 
-    addParam(lay1, "下采样 (Leaf):", 0.01, "m");
+    auto *rowLeaf = new QHBoxLayout();
+    QLabel *lblLeaf = new QLabel("下采样 (Leaf):"); 
+    lblLeaf->setStyleSheet("color: #606266;");
+    rowLeaf->addWidget(lblLeaf);
+
+    // 初始化成员变量 m_spinLeafSize
+    m_spinLeafSize = new QDoubleSpinBox();
+    m_spinLeafSize->setRange(1.0, 100.0); // 范围: 1mm ~ 100mm
+    m_spinLeafSize->setValue(10.0);       // 默认: 10mm
+    m_spinLeafSize->setSingleStep(1.0);   // 步长: 1mm
+    m_spinLeafSize->setDecimals(1);       // 小数位: 1
+    m_spinLeafSize->setButtonSymbols(QAbstractSpinBox::PlusMinus);
+    m_spinLeafSize->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; border-radius: 3px; padding: 2px;");
+    
+    rowLeaf->addWidget(m_spinLeafSize);
+    rowLeaf->addWidget(new QLabel("mm")); // 单位改为 mm
+    lay1->addLayout(rowLeaf);
+
+    // 连接信号：数值改变 -> 触发 onPreviewDownsample
+    connect(m_spinLeafSize, QOverload<double>::of(&QDoubleSpinBox::valueChanged), 
+            this, &SingleModePage::onPreviewDownsample);
+
+
     addParam(lay1, "离群点 (StdDev):", 1.0);
     
     // MeanK 是整数
@@ -694,4 +717,55 @@ void SingleModePage::resizeEvent(QResizeEvent *event) {
             m_viewer->setWindowBorders(true); // 强制刷新布局
         }
     }
+}
+
+
+void SingleModePage::onPreviewDownsample() {
+    // 1. 获取当前设置的参数 (mm)
+    float leaf_mm = m_spinLeafSize->value();
+
+    // 2. 遍历当前内存中已加载的所有点云
+    // 注意：我们基于 m_cloudData (原始数据) 进行处理，而不是在已处理的数据上重复处理
+    // 这样用户把滑块滑回去时，点云能变回原来的密度
+    for (auto it = m_cloudData.begin(); it != m_cloudData.end(); ++it) {
+        QString key = it.key();
+        PointCloudT::Ptr rawCloud = it.value();
+
+        // 检查该图层是否被勾选显示，如果没勾选，就没必要浪费算力去处理它
+        // (除非你想后台处理好准备着。为了流畅，我们只处理可见的)
+        if (!m_layerChecks.contains(key) || !m_layerChecks[key]->isChecked()) {
+            continue; 
+        }
+
+        // 3. 调用算法核心进行下采样
+        PointCloudT::Ptr filteredCloud = PointCloudAlgo::downsample(rawCloud, leaf_mm);
+
+        if (filteredCloud) {
+            // 4. 更新可视化 (先移除旧的，再加新的)
+            std::string cloudId = key.toStdString();
+            m_viewer->removePointCloud(cloudId);
+
+            // 保持原来的颜色设置
+            pcl::visualization::PointCloudColorHandlerCustom<PointT> colorHandler(filteredCloud, 255, 255, 255);
+            m_viewer->addPointCloud(filteredCloud, colorHandler, cloudId);
+            
+            // 恢复颜色 (这里简单的重新写一遍颜色逻辑，优化的话可以封装成函数)
+            double r=1.0, g=1.0, b=1.0;
+            if (key == "Top") { r=1.0; g=0.0; b=0.0; }
+            else if (key == "LB") { r=0.0; g=1.0; b=0.0; }
+            else if (key == "LT") { r=0.0; g=0.0; b=1.0; }
+            else if (key == "RB") { r=1.0; g=0.84; b=0.0; }
+            else if (key == "RT") { r=0.0; g=1.0; b=1.0; }
+            
+            m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, cloudId);
+            m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, cloudId);
+        }
+    }
+
+    // 5. 刷新界面
+    // 我们的定时器会自动刷新，或者手动调用一次 Render
+    if(m_viewer->getRenderWindow()) m_viewer->getRenderWindow()->Render();
+    
+    // 在状态栏或控制台输出提示（可选）
+    qDebug() << "已更新下采样视图，Leaf Size:" << leaf_mm << "mm";
 }

@@ -2,6 +2,7 @@
 #include <QWidget>
 #include <QMap>
 #include <QTimer>
+#include "core/PointCloudAlgo.h"
 // PCL 相关头文件
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -11,7 +12,7 @@
 class QLineEdit;
 class QPushButton;
 class QCheckBox; // 新增
-
+class QDoubleSpinBox;
 
 // 定义点云类型别名，方便书写
 using PointT = pcl::PointXYZ;
@@ -36,6 +37,8 @@ private slots:
     void onClearFiles();
     // [新增] 响应图层复选框状态改变
     void onLayerToggle(const QString& layerId, bool checked);
+    // [新增] 执行下采样预览
+    void onPreviewDownsample();
 
 private:
     void initLeftPanel();
@@ -68,4 +71,7 @@ private:
     // [新增] 内存中缓存的点云数据 (Key: "Top", "LB", "Merged" 等)
     // 这样勾选时直接从内存拿数据，不用读硬盘，速度快
     QMap<QString, PointCloudT::Ptr> m_cloudData;
+
+    // [新增] 保存下采样参数控件的指针，方便读取数值
+    QDoubleSpinBox* m_spinLeafSize;
 };
