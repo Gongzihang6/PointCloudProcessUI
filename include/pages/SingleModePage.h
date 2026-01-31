@@ -13,6 +13,7 @@ class QLineEdit;
 class QPushButton;
 class QCheckBox; // 新增
 class QDoubleSpinBox;
+class QSpinBox;
 
 // 定义点云类型别名，方便书写
 using PointT = pcl::PointXYZ;
@@ -37,8 +38,8 @@ private slots:
     void onClearFiles();
     // [新增] 响应图层复选框状态改变
     void onLayerToggle(const QString& layerId, bool checked);
-    // [新增] 执行下采样预览
-    void onPreviewDownsample();
+    // [新增] 执行预处理预览
+    void onRunPreprocess();
 
 private:
     void initLeftPanel();
@@ -72,6 +73,11 @@ private:
     // 这样勾选时直接从内存拿数据，不用读硬盘，速度快
     QMap<QString, PointCloudT::Ptr> m_cloudData;
 
-    // [新增] 保存下采样参数控件的指针，方便读取数值
-    QDoubleSpinBox* m_spinLeafSize;
+    // [新增] 预处理参数控件指针
+    QDoubleSpinBox* m_spinLeafSize;   // 下采样
+    QDoubleSpinBox* m_spinStdDev;     // SOR 标准差倍数
+    QSpinBox* m_spinMeanK;      // SOR 邻近点数
+    QDoubleSpinBox* m_spinClipRadius; // 半径裁剪
+
+    void applyPreprocessToMemory();
 };

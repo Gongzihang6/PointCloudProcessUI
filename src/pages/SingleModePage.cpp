@@ -250,7 +250,7 @@ void SingleModePage::initRightPanel() {
     };
 
     auto *rowLeaf = new QHBoxLayout();
-    QLabel *lblLeaf = new QLabel("下采样 (Leaf):"); 
+    QLabel *lblLeaf = new QLabel("下采样 (1-100):"); 
     lblLeaf->setStyleSheet("color: #606266;");
     rowLeaf->addWidget(lblLeaf);
 
@@ -267,28 +267,68 @@ void SingleModePage::initRightPanel() {
     rowLeaf->addWidget(new QLabel("mm")); // 单位改为 mm
     lay1->addLayout(rowLeaf);
 
-    // 连接信号：数值改变 -> 触发 onPreviewDownsample
-    connect(m_spinLeafSize, QOverload<double>::of(&QDoubleSpinBox::valueChanged), 
-            this, &SingleModePage::onPreviewDownsample);
-
-
-    addParam(lay1, "离群点 (StdDev):", 1.0);
+    // === 2. 统计滤波 (SOR) ===
+    // 2.1 离群点阈值 (StdDev Mul)
+    auto *rowStd = new QHBoxLayout();
+    rowStd->addWidget(new QLabel("Std倍数 (0.1-10):")); // UI 修改：名称更准确
     
-    // MeanK 是整数
+    m_spinStdDev = new QDoubleSpinBox();
+    m_spinStdDev->setRange(0.1, 10.0); // 通常 1.0 - 3.0
+    m_spinStdDev->setValue(1.0);       // 默认 1.0
+    m_spinStdDev->setSingleStep(0.1);
+    m_spinStdDev->setDecimals(1);
+    m_spinStdDev->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowStd->addWidget(m_spinStdDev);
+    lay1->addLayout(rowStd);
+
+    // 2.2 邻近点数 (MeanK)
     auto *rowMeanK = new QHBoxLayout();
-    rowMeanK->addWidget(new QLabel("邻近点 (MeanK):"));
-    QSpinBox *sbMeanK = new QSpinBox(); sbMeanK->setValue(50); sbMeanK->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    sbMeanK->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; border-radius: 3px; padding: 2px;");
-    rowMeanK->addWidget(sbMeanK);
+    rowMeanK->addWidget(new QLabel("邻近点数 (1-200):"));
+    
+    m_spinMeanK = new QSpinBox();
+    m_spinMeanK->setRange(1, 200);
+    m_spinMeanK->setValue(50);         // 默认 50
+    m_spinMeanK->setSingleStep(10);
+    m_spinMeanK->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowMeanK->addWidget(m_spinMeanK);
     lay1->addLayout(rowMeanK);
 
-    addParam(lay1, "背景半径 (Clip):", 2500, "mm");
+    // === 3. 半径裁剪 (Clip Radius) ===
+    auto *rowClip = new QHBoxLayout();
+    rowClip->addWidget(new QLabel("背景裁剪 (500-10000):"));
+    
+    m_spinClipRadius = new QDoubleSpinBox();
+    m_spinClipRadius->setRange(500.0, 10000.0); // 0.5m - 10m
+    m_spinClipRadius->setValue(2500.0);         // 默认 2.5m
+    m_spinClipRadius->setSingleStep(100.0);
+    m_spinClipRadius->setSuffix(" mm");
+    m_spinClipRadius->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowClip->addWidget(m_spinClipRadius);
+    lay1->addLayout(rowClip);
+
+    // === 4. 信号连接 (所有参数改变都触发同一个处理函数) ===
+    // 使用 QOverload 处理重载函数的指针
+    connect(m_spinLeafSize, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &SingleModePage::onRunPreprocess);
+    connect(m_spinStdDev, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &SingleModePage::onRunPreprocess);
+    connect(m_spinMeanK, QOverload<int>::of(&QSpinBox::valueChanged), this, &SingleModePage::onRunPreprocess);
+    connect(m_spinClipRadius, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &SingleModePage::onRunPreprocess);
 
     auto *btnRow1 = new QHBoxLayout();
-    btnRow1->addWidget(new QPushButton("👁️ 预览效果"));
+    QPushButton *btnPreview = new QPushButton("👁️ 预览效果");
+    btnRow1->addWidget(btnPreview);
+    // [修复 1] 连接预览按钮 -> 触发处理 (只更新视图)
+    connect(btnPreview, &QPushButton::clicked, this, &SingleModePage::onRunPreprocess);
+
     QPushButton *btnExec1 = new QPushButton("🛠️ 执行处理");
     btnExec1->setObjectName("PrimaryBtn");
     btnRow1->addWidget(btnExec1);
+    // [修复 2] 连接执行按钮 -> 触发应用 (更新内存数据)
+    // 我们需要一个新的槽函数 onApplyPreprocess，或者用 Lambda
+    connect(btnExec1, &QPushButton::clicked, this, [this](){
+        // 先运行一遍处理逻辑
+        onRunPreprocess(); 
+        applyPreprocessToMemory(); 
+    });
     lay1->addLayout(btnRow1);
 
     box1->setContentLayout(lay1);
@@ -720,52 +760,90 @@ void SingleModePage::resizeEvent(QResizeEvent *event) {
 }
 
 
-void SingleModePage::onPreviewDownsample() {
-    // 1. 获取当前设置的参数 (mm)
+void SingleModePage::onRunPreprocess() {
+    // 1. 获取所有参数
     float leaf_mm = m_spinLeafSize->value();
+    double std_dev = m_spinStdDev->value();
+    int mean_k = m_spinMeanK->value();
+    float clip_radius_mm = m_spinClipRadius->value();
 
-    // 2. 遍历当前内存中已加载的所有点云
-    // 注意：我们基于 m_cloudData (原始数据) 进行处理，而不是在已处理的数据上重复处理
-    // 这样用户把滑块滑回去时，点云能变回原来的密度
+    // 2. 遍历所有可见点云
     for (auto it = m_cloudData.begin(); it != m_cloudData.end(); ++it) {
         QString key = it.key();
-        PointCloudT::Ptr rawCloud = it.value();
-
-        // 检查该图层是否被勾选显示，如果没勾选，就没必要浪费算力去处理它
-        // (除非你想后台处理好准备着。为了流畅，我们只处理可见的)
+        
+        // 只处理勾选显示的层，节省资源
         if (!m_layerChecks.contains(key) || !m_layerChecks[key]->isChecked()) {
             continue; 
         }
 
-        // 3. 调用算法核心进行下采样
-        PointCloudT::Ptr filteredCloud = PointCloudAlgo::downsample(rawCloud, leaf_mm);
+        PointCloudT::Ptr currentCloud = it.value(); // 从原始数据开始
 
-        if (filteredCloud) {
-            // 4. 更新可视化 (先移除旧的，再加新的)
-            std::string cloudId = key.toStdString();
-            m_viewer->removePointCloud(cloudId);
+        // --- Step 1: 下采样 ---
+        // (先做下采样可以大大显著减少后续 SOR 的计算量)
+        currentCloud = PointCloudAlgo::downsample(currentCloud, leaf_mm);
+        if (!currentCloud) continue;
 
-            // 保持原来的颜色设置
-            pcl::visualization::PointCloudColorHandlerCustom<PointT> colorHandler(filteredCloud, 255, 255, 255);
-            m_viewer->addPointCloud(filteredCloud, colorHandler, cloudId);
-            
-            // 恢复颜色 (这里简单的重新写一遍颜色逻辑，优化的话可以封装成函数)
-            double r=1.0, g=1.0, b=1.0;
-            if (key == "Top") { r=1.0; g=0.0; b=0.0; }
-            else if (key == "LB") { r=0.0; g=1.0; b=0.0; }
-            else if (key == "LT") { r=0.0; g=0.0; b=1.0; }
-            else if (key == "RB") { r=1.0; g=0.84; b=0.0; }
-            else if (key == "RT") { r=0.0; g=1.0; b=1.0; }
-            
-            m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, cloudId);
-            m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, cloudId);
-        }
+        // --- Step 2: 统计滤波 (SOR) ---
+        currentCloud = PointCloudAlgo::statisticalOutlierRemoval(currentCloud, mean_k, std_dev);
+        if (!currentCloud) continue;
+
+        // --- Step 3: 半径裁剪 ---
+        currentCloud = PointCloudAlgo::distanceClip(currentCloud, clip_radius_mm);
+        if (!currentCloud) continue;
+
+        // 3. 更新可视化
+        std::string cloudId = key.toStdString();
+        m_viewer->removePointCloud(cloudId);
+
+        pcl::visualization::PointCloudColorHandlerCustom<PointT> colorHandler(currentCloud, 255, 255, 255);
+        m_viewer->addPointCloud(currentCloud, colorHandler, cloudId);
+        
+        // 恢复颜色
+        double r=1.0, g=1.0, b=1.0;
+        if (key == "Top") { r=1.0; g=0.0; b=0.0; }
+        else if (key == "LB") { r=0.0; g=1.0; b=0.0; }
+        else if (key == "LT") { r=0.0; g=0.0; b=1.0; }
+        else if (key == "RB") { r=1.0; g=0.84; b=0.0; }
+        else if (key == "RT") { r=0.0; g=1.0; b=1.0; }
+        
+        m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, r, g, b, cloudId);
+        m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, cloudId);
     }
 
-    // 5. 刷新界面
-    // 我们的定时器会自动刷新，或者手动调用一次 Render
+    // 4. 刷新视图
     if(m_viewer->getRenderWindow()) m_viewer->getRenderWindow()->Render();
-    
-    // 在状态栏或控制台输出提示（可选）
-    qDebug() << "已更新下采样视图，Leaf Size:" << leaf_mm << "mm";
+}
+
+
+void SingleModePage::applyPreprocessToMemory() {
+    // 1. 获取当前参数
+    float leaf = m_spinLeafSize->value();
+    double std_dev = m_spinStdDev->value();
+    int mean_k = m_spinMeanK->value();
+    float radius = m_spinClipRadius->value();
+
+    int count = 0;
+    // 2. 遍历内存数据，永久更新它们
+    for (auto it = m_cloudData.begin(); it != m_cloudData.end(); ++it) {
+        // 对所有数据（无论是否显示）都进行处理，保证一致性
+        PointCloudT::Ptr raw = it.value();
+        
+        // 依次执行三个算法
+        auto p1 = PointCloudAlgo::downsample(raw, leaf);
+        if(!p1) continue;
+        auto p2 = PointCloudAlgo::statisticalOutlierRemoval(p1, mean_k, std_dev);
+        if(!p2) continue;
+        auto p3 = PointCloudAlgo::distanceClip(p2, radius);
+        if(!p3) continue;
+
+        // [关键] 覆盖内存中的数据
+        m_cloudData[it.key()] = p3;
+        count++;
+    }
+
+    QMessageBox::information(this, "处理完成", 
+        QString("已对 %1 个点云执行预处理并保存到内存。\n后续配准将使用新数据。").arg(count));
+        
+    // 刷新一下视图
+    onRunPreprocess(); 
 }
