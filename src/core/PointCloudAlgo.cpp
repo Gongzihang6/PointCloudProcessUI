@@ -72,3 +72,50 @@ PointCloudT::Ptr PointCloudAlgo::distanceClip(PointCloudT::Ptr cloud_in, float r
 
     return cloud_out;
 }
+
+// 4. 应用变换
+PointCloudT::Ptr PointCloudAlgo::transformCloud(PointCloudT::Ptr cloud_in, const Eigen::Matrix4f& matrix) {
+    if (!cloud_in || cloud_in->empty()) return nullptr;
+    PointCloudT::Ptr cloud_out(new PointCloudT);
+    pcl::transformPointCloud(*cloud_in, *cloud_out, matrix);
+    return cloud_out;
+}
+
+// 5. ICP 配准
+std::pair<PointCloudT::Ptr, Eigen::Matrix4f> PointCloudAlgo::alignICP(
+    PointCloudT::Ptr cloud_source, 
+    PointCloudT::Ptr cloud_target, 
+    const Eigen::Matrix4f& init_guess,
+    int max_iter,
+    double dist_thresh) 
+{
+    if (!cloud_source || !cloud_target) return {nullptr, Eigen::Matrix4f::Identity()};
+
+    PointCloudT::Ptr cloud_aligned(new PointCloudT);
+    
+    pcl::IterativeClosestPoint<PointT, PointT> icp;
+    icp.setInputSource(cloud_source);
+    icp.setInputTarget(cloud_target);
+    
+    // 设置 ICP 参数
+    icp.setMaxCorrespondenceDistance(dist_thresh); // 对应点最大距离 (m)
+    icp.setMaximumIterations(max_iter);
+    icp.setTransformationEpsilon(1e-8);
+    icp.setEuclideanFitnessEpsilon(1e-5);
+
+    // 执行配准 (传入初始猜测矩阵)
+    icp.align(*cloud_aligned, init_guess);
+
+    Eigen::Matrix4f final_transform = init_guess;
+    
+    if (icp.hasConverged()) {
+        std::cout << "[Algo] ICP 收敛! 分数: " << icp.getFitnessScore() << std::endl;
+        final_transform = icp.getFinalTransformation();
+    } else {
+        std::cout << "[Algo] ICP 未收敛!" << std::endl;
+        // 如果未收敛，可以使用初始猜测的结果变换点云，或者直接返回空
+        // 这里我们要么返回初始变换后的，要么报错。通常返回配准结果，哪怕不好。
+    }
+
+    return {cloud_aligned, final_transform};
+}
