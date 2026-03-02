@@ -18,8 +18,14 @@
 #include <QFileDialog> // 文件对话框
 #include <QDir>        // 目录操作
 #include <QDebug>      // 用于调试打印
-#include <vtkRenderWindow.h> // [新增] VTK 标准渲染窗口
+#include <vtkRenderWindow.h> // VTK 标准渲染窗口
 #include <vtkGenericOpenGLRenderWindow.h> // 必须包含这个
+#include <vtkRenderWindowInteractor.h>
+#include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkCommand.h>
+#include <vtkPointPicker.h>
+#include <vtkCamera.h>
+#include <vtkRenderer.h>
 #include <pcl/io/pcd_io.h>                // 用于读取 PCD
 #include <QMessageBox>                    // 用于报错提示
 #include <QPixmap>
@@ -29,6 +35,91 @@
 #include <QSplitter>
 #include <QDateTime>
 #include <QScrollBar>
+
+
+// 自定义 VTK 交互拦截器：模仿 CloudCompare
+class CloudCompareMouseCallback : public vtkCommand {
+public:
+    static CloudCompareMouseCallback* New() { return new CloudCompareMouseCallback; }
+    
+    // 保存默认交互样式的指针
+    vtkInteractorStyleTrackballCamera* style = nullptr;
+    // 用于向 UI 打印日志的回调
+    std::function<void(const QString&)> logger;
+
+    void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
+        vtkRenderWindowInteractor* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
+        if (!iren || !style) return;
+
+        // 获取鼠标当前在屏幕上的 2D 像素坐标
+        int x = iren->GetEventPosition()[0];
+        int y = iren->GetEventPosition()[1];
+
+        switch (eventId) {
+            // ==========================================
+            // 1. 右键 -> 改为平移 (Pan)
+            // ==========================================
+            case vtkCommand::RightButtonPressEvent:
+                style->FindPokedRenderer(x, y);
+                if (style->GetCurrentRenderer()) {
+                    style->StartPan();   // 启动平移
+                    this->AbortFlagOn(); // [关键] 拦截事件，阻止 VTK 默认的右键缩放
+                }
+                break;
+            case vtkCommand::RightButtonReleaseEvent:
+                style->EndPan();
+                this->AbortFlagOn();
+                break;
+
+            // ==========================================
+            // 2. 中键 -> 改为缩放 (Dolly) - 交换原本的右键功能
+            // ==========================================
+            case vtkCommand::MiddleButtonPressEvent:
+                style->FindPokedRenderer(x, y);
+                if (style->GetCurrentRenderer()) {
+                    style->StartDolly(); // 启动缩放
+                    this->AbortFlagOn(); // 阻止 VTK 默认的中键平移
+                }
+                break;
+            case vtkCommand::MiddleButtonReleaseEvent:
+                style->EndDolly();
+                this->AbortFlagOn();
+                break;
+
+            // ==========================================
+            // 3. 左键双击 -> 拾取点并设置为旋转中心
+            // ==========================================
+            case vtkCommand::LeftButtonDoubleClickEvent:
+                style->FindPokedRenderer(x, y);
+                vtkRenderer* ren = style->GetCurrentRenderer();
+                if (ren) {
+                    // 使用 vtkPointPicker 向 3D 空间发射射线，拾取最近的点
+                    vtkSmartPointer<vtkPointPicker> picker = vtkSmartPointer<vtkPointPicker>::New();
+                    picker->SetTolerance(0.005); // 拾取容差 (防止点太稀疏点不到)
+                    picker->Pick(x, y, 0.0, ren);
+
+                    if (picker->GetPointId() != -1) {
+                        // 如果拾取成功，获取该点的 3D 坐标
+                        double* pickPos = picker->GetPickPosition();
+                        
+                        // [核心原理] 将相机的焦点 (Focal Point) 移动到被拾取的点
+                        // 这样鼠标左键拖拽旋转时，就会以此点为球心旋转
+                        ren->GetActiveCamera()->SetFocalPoint(pickPos[0], pickPos[1], pickPos[2]);
+                        iren->Render(); // 触发重绘
+                        
+                        // 发送日志到界面
+                        if (logger) {
+                            QString msg = QString("📍 已设置旋转中心: (%.1f, %.1f, %.1f)")
+                                          .arg(pickPos[0]).arg(pickPos[1]).arg(pickPos[2]);
+                            logger(msg);
+                        }
+                    }
+                }
+                this->AbortFlagOn();
+                break;
+        }
+    }
+};
 
 SingleModePage::SingleModePage(QWidget *parent) : QWidget(parent) {
     auto *layout = new QHBoxLayout(this);
@@ -86,7 +177,7 @@ void SingleModePage::initLeftPanel() {
         layout->addLayout(row);
     }
     
-    // [新增] 底部按钮组容器
+    // 底部按钮组容器
     QHBoxLayout *bottomBtnLayout = new QHBoxLayout();
     bottomBtnLayout->setSpacing(5); // 按钮间距
 
@@ -168,6 +259,10 @@ void SingleModePage::initCenterView() {
 
     // ==========================================
     // 上半部分：3D 视图容器 (m_vtkContainer)
+    // 准备一个纯净的、直接与操作系统对话的画板，交给后面的 3D 渲染引擎（VTK/PCL）
+    // WA_OpaquePaintEvent: 告诉 Qt 这个 Widget 的绘制事件会完全覆盖之前的内容，不需要保留任何背景信息，这样可以避免不必要的重绘和闪烁
+    // WA_PaintOnScreen: 告诉 Qt 不要使用双缓冲机制，不要干预这个 Widget 的绘制过程，直接在屏幕上绘制
+    // WA_NativeWindow: 强制 Qt 为这个 Widget 向操作系统申请一个真实的、独立的窗口句柄
     // ==========================================
     m_vtkContainer = new QWidget();
     m_vtkContainer->setAttribute(Qt::WA_OpaquePaintEvent);
@@ -179,7 +274,7 @@ void SingleModePage::initCenterView() {
 
     // --- VTK 初始化逻辑保持不变 ---
     vtkSmartPointer<vtkRenderWindow> renWin = vtkSmartPointer<vtkRenderWindow>::New();
-    renWin->SetParentId(reinterpret_cast<void*>(m_vtkContainer->winId()));
+    renWin->SetParentId(reinterpret_cast<void*>(m_vtkContainer->winId()));  // 把 Qt 的窗口强行“嫁接”给 VTK
 
     vtkSmartPointer<vtkRenderer> renderer = vtkSmartPointer<vtkRenderer>::New();
     renWin->AddRenderer(renderer);
@@ -188,10 +283,39 @@ void SingleModePage::initCenterView() {
     if (m_viewer->getRenderWindow()->GetInteractor()) {
         m_viewer->getRenderWindow()->GetInteractor()->Initialize();
     }
-    m_viewer->setBackgroundColor(0.1, 0.1, 0.1);
-    m_viewer->addCoordinateSystem(100.0);
-    m_viewer->initCameraParameters();
+    m_viewer->setBackgroundColor(0.1, 0.1, 0.1);    // 深灰色背景
+    m_viewer->addCoordinateSystem(100.0);           // 添加坐标轴
+    m_viewer->initCameraParameters();               // 初始化相机视角
 
+    // =========================================================
+    // [新增] 注入 CloudCompare 风格鼠标交互
+    // =========================================================
+    vtkRenderWindowInteractor* iren = m_viewer->getRenderWindow()->GetInteractor();
+    // PCL 默认使用的是 vtkInteractorStyleTrackballCamera 的子类
+    vtkInteractorStyleTrackballCamera* style = 
+        vtkInteractorStyleTrackballCamera::SafeDownCast(iren->GetInteractorStyle());
+
+    if (style) {
+        vtkSmartPointer<CloudCompareMouseCallback> ccCallback = vtkSmartPointer<CloudCompareMouseCallback>::New();
+        ccCallback->style = style;
+        
+        // 绑定日志输出 Lambda，使用前面写好的漂亮 log 函数
+        ccCallback->logger = [this](const QString& msg) { 
+            this->log(msg, "INFO"); 
+        };
+
+        // AddObserver 的第三个参数 1.0 表示“高优先级”
+        // 确保我们的代码在 VTK 默认代码之前抢先执行并 Abort 掉默认事件
+        iren->AddObserver(vtkCommand::RightButtonPressEvent, ccCallback, 1.0);
+        iren->AddObserver(vtkCommand::RightButtonReleaseEvent, ccCallback, 1.0);
+        iren->AddObserver(vtkCommand::MiddleButtonPressEvent, ccCallback, 1.0);
+        iren->AddObserver(vtkCommand::MiddleButtonReleaseEvent, ccCallback, 1.0);
+        iren->AddObserver(vtkCommand::LeftButtonDoubleClickEvent, ccCallback, 1.0);
+    }
+    // =========================================================
+
+
+    // 解决“双事件循环”死锁 (定时器刷新)
     m_refreshTimer = new QTimer(this);
     connect(m_refreshTimer, &QTimer::timeout, [this](){
         if(m_viewer) m_viewer->spinOnce(1, true);
@@ -199,11 +323,13 @@ void SingleModePage::initCenterView() {
     m_refreshTimer->start(30);
     // ----------------------------
 
+
+
     // ==========================================
     // 下半部分：控制台日志 (m_console)
     // ==========================================
     m_console = new QTextEdit();
-    m_console->setReadOnly(true); // 只读
+    m_console->setReadOnly(true); // 只读，确保用户不能在里面乱打字破坏日志
     m_console->setPlaceholderText("系统准备就绪...");
     
     // 设置黑客风格/终端样式
@@ -234,7 +360,7 @@ void SingleModePage::initCenterView() {
 
 void SingleModePage::initRightPanel() {
     rightPanel = new QWidget(this);
-    rightPanel->setFixedWidth(340);
+    rightPanel->setFixedWidth(400);
     rightPanel->setStyleSheet("background: #ffffff; border-left: 1px solid #dcdfe6;");
     
     QVBoxLayout *mainLayout = new QVBoxLayout(rightPanel);
@@ -352,13 +478,7 @@ void SingleModePage::initRightPanel() {
     QPushButton *btnExec1 = new QPushButton("🛠️ 执行处理");
     btnExec1->setObjectName("PrimaryBtn");
     btnRow1->addWidget(btnExec1);
-    // [修复 2] 连接执行按钮 -> 触发应用 (更新内存数据)
-    // 我们需要一个新的槽函数 onApplyPreprocess，或者用 Lambda
-    connect(btnExec1, &QPushButton::clicked, this, [this](){
-        // 先运行一遍处理逻辑
-        onRunPreprocess(); 
-        applyPreprocessToMemory(); 
-    });
+    connect(btnExec1, &QPushButton::clicked, this, &SingleModePage::applyPreprocessToMemory);
     lay1->addLayout(btnRow1);
 
     box1->setContentLayout(lay1);
@@ -370,17 +490,17 @@ void SingleModePage::initRightPanel() {
     // 先调用初始化
     initDefaultMatrices();
 
-    auto *box2 = new CollapsibleBox("2. 配准与融合 (Registration)");
+    auto *box2 = new CollapsibleBox("2. 配准与融合 (Registration)");    // 自定义的 Qt 控件
     auto *lay2 = new QVBoxLayout();
-    lay2->setSpacing(12);
+    lay2->setSpacing(2);
 
-    // [新增] 2.0 配准目标选择 (Reference Target)
+    // 2.0 配准目标选择 (Reference Target)
     auto *rowRegTarget = new QHBoxLayout();
     QLabel *lblRef = new QLabel("参考目标 (Reference):");
-    lblRef->setToolTip("选择源点云要配准到哪个坐标系\n默认是 Top，也可以选相邻相机");
+    lblRef->setToolTip("选择源点云要配准到哪个坐标系\n默认是 Top，也可以选相邻相机");   // 在lblRef上添加提示信息
     rowRegTarget->addWidget(lblRef);
 
-    m_comboRegTarget = new QComboBox();
+    m_comboRegTarget = new QComboBox();     // 配准目标的下拉选择框
     // 目标可以是任意一个相机
     m_comboRegTarget->addItems({"Top", "LB", "LT", "RB", "RT"}); 
     rowRegTarget->addWidget(m_comboRegTarget);
@@ -396,36 +516,38 @@ void SingleModePage::initRightPanel() {
 
     // 2.2 [关键新增] 参与配准的源点云选择
     QLabel* lblSrc = new QLabel("选择待配准源 (Target=Top):");
-    lblSrc->setStyleSheet("font-weight: bold; color: #409eff;");
+    lblSrc->setStyleSheet("font-weight: bold; color: #409eff;");    // 蓝色加粗字体
     lay2->addWidget(lblSrc);
 
     auto *gridSrc = new QGridLayout();
     QStringList sources = {"LB", "LT", "RB", "RT"};
     int col = 0, row = 0;
-    for(const auto& src : sources) {
+    for(const auto& src : sources) {    // 遍历检查哪些点云参与配准
         QCheckBox* chk = new QCheckBox(src);
-        chk->setChecked(true); // 默认全选
-        m_sourceChecks[src] = chk;
-        gridSrc->addWidget(chk, row, col);
-        col++; if(col > 1) { col=0; row++; }
+        chk->setChecked(true);      // 默认全选
+        m_sourceChecks[src] = chk;  // 存入字典，方便后续读取状态
+        gridSrc->addWidget(chk, row, col);  // 加入网格的指定行列
+        col++; if(col > 1) { col=0; row++; }    // 核心逻辑：控制换行
     }
     lay2->addLayout(gridSrc);
 
     // 2.3 矩阵编辑器 (联动显示)
     QFrame *matrixFrame = new QFrame();
     matrixFrame->setStyleSheet("background: #f8f9fa; border: 1px solid #e4e7ed; border-radius: 4px; padding: 5px;");
-    QVBoxLayout *matrixLay = new QVBoxLayout(matrixFrame);
+    QVBoxLayout *matrixLay = new QVBoxLayout(matrixFrame);  // 创建矩阵编辑框
+    matrixLay->setContentsMargins(2, 2, 2, 2); 
+    matrixLay->setSpacing(5); // 减小 "编辑矩阵" 标签和 文本框 之间的距离
     
     auto *rowMatTarget = new QHBoxLayout();
     rowMatTarget->addWidget(new QLabel("编辑矩阵:"));
     m_comboMatrixView = new QComboBox();
-    m_comboMatrixView->addItems(sources); // LB, LT, RB, RT
+    m_comboMatrixView->addItems(sources);   // LB, LT, RB, RT
     rowMatTarget->addWidget(m_comboMatrixView);
     matrixLay->addLayout(rowMatTarget);
 
     m_textMatrix = new QTextEdit();
     m_textMatrix->setObjectName("MatrixEditor");
-    m_textMatrix->setFixedHeight(120);
+    m_textMatrix->setFixedHeight(160);
     // 初始显示 LB 的矩阵
     m_textMatrix->setText(matrixToString(m_transforms["LB"]));
     matrixLay->addWidget(m_textMatrix);
@@ -446,30 +568,54 @@ void SingleModePage::initRightPanel() {
     
     connect(btnReg, &QPushButton::clicked, this, &SingleModePage::onExecuteRegistration);
 
-    box2->setContentLayout(lay2);
-    scrollLayout->addWidget(box2);
+    box2->setContentLayout(lay2);       // 设置 box2 的内容布局
+    scrollLayout->addWidget(box2);      // 将 box2 加入右侧滚动区域
 
     // =================================================
-    // 3. 主体精细提取 (Extraction) - [补全]
+    // 3. 主体精细提取 (Extraction)
     // =================================================
     auto *box3 = new CollapsibleBox("3. 主体精细提取 (Extraction)");
     auto *lay3 = new QVBoxLayout();
     lay3->setSpacing(8);
     
-    // 补齐之前的缺失参数
-    addParam(lay3, "聚类容差 (Tol):", 0.05, "m");
+    // [新增] 1. 地面滤除阈值 (RANSAC)
+    auto *rowRansac = new QHBoxLayout();
+    rowRansac->addWidget(new QLabel("地面滤除厚度:"));
+    m_spinRansacThresh = new QDoubleSpinBox();
+    m_spinRansacThresh->setRange(1.0, 100.0);
+    m_spinRansacThresh->setValue(20.0); // 默认将 15mm 厚度的底层视为地面
+    m_spinRansacThresh->setSuffix(" mm");
+    m_spinRansacThresh->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowRansac->addWidget(m_spinRansacThresh);
+    lay3->addLayout(rowRansac);
+
+    // 2. 聚类容差
+    auto *rowTol = new QHBoxLayout();
+    rowTol->addWidget(new QLabel("聚类容差 (Tol):"));
+    m_spinExtractTol = new QDoubleSpinBox();
+    m_spinExtractTol->setRange(5.0, 200.0); 
+    m_spinExtractTol->setValue(40.0); // 默认 50mm，足够跨越猪身上的小缝隙
+    m_spinExtractTol->setSuffix(" mm");
+    m_spinExtractTol->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowTol->addWidget(m_spinExtractTol);
+    lay3->addLayout(rowTol);
     
+    // 3. 最小点数
     auto *rowMinSize = new QHBoxLayout();
     rowMinSize->addWidget(new QLabel("最小簇点数:"));
-    QSpinBox *sbMinSize = new QSpinBox(); sbMinSize->setRange(1, 10000); sbMinSize->setValue(100);
-    sbMinSize->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    sbMinSize->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; border-radius: 3px; padding: 2px;");
-    rowMinSize->addWidget(sbMinSize);
+    m_spinExtractMinSize = new QSpinBox(); 
+    m_spinExtractMinSize->setRange(1, 1000000); 
+    m_spinExtractMinSize->setValue(5000); // 猪体很大，设为 5000 可以过滤掉设备架子等中型噪点
+    m_spinExtractMinSize->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
+    rowMinSize->addWidget(m_spinExtractMinSize);
     lay3->addLayout(rowMinSize);
 
-    QPushButton *btnExtract = new QPushButton("🐷 提取最大主体");
-    btnExtract->setObjectName("PrimaryBtn"); // 蓝色按钮
+    // 提取按钮
+    QPushButton *btnExtract = new QPushButton("🐷 提取平滑最大主体");
+    btnExtract->setObjectName("PrimaryBtn");
     lay3->addWidget(btnExtract);
+    connect(btnExtract, &QPushButton::clicked, this, &SingleModePage::onExtractBody);
+
 
     box3->setContentLayout(lay3);
     scrollLayout->addWidget(box3);
@@ -619,19 +765,19 @@ void SingleModePage::onBrowseFile(const QString& key) {
             QLineEdit* edit = m_fileInputs[key];
             QFileInfo fileInfo(fileName);
 
-            // [修改] 1. 界面只显示文件名
+            // 1. 界面只显示文件名
             edit->setText(fileInfo.fileName());
             
-            // [修改] 2. 将完整路径存储在自定义属性 "fullPath" 中
+            // 2. 将完整路径存储在自定义属性 "fullPath" 中
             edit->setProperty("fullPath", fileInfo.absoluteFilePath());
             
-            // [修改] 3. 设置鼠标悬停提示，方便用户查看完整路径
+            // 3. 设置鼠标悬停提示，方便用户查看完整路径
             edit->setToolTip(fileInfo.absoluteFilePath());
             
             // [UI反馈] 光标移到最前，防止长文件名看不见开头
             edit->setCursorPosition(0); 
 
-            // [新增] 立即加载并显示这个点云
+            // 立即加载并显示这个点云
             loadCloudToMemory(key, fileName);
         }
     }
@@ -648,8 +794,8 @@ void SingleModePage::onLoadFolder() {
 
     QMap<QString, QString> keyMap;
     keyMap["005J"] = "Top";
-    keyMap["00SE"] = "LT"; 
-    keyMap["003W"] = "LB"; 
+    keyMap["00SE"] = "LB"; 
+    keyMap["003W"] = "LT"; 
     keyMap["00YA"] = "RB";
     keyMap["00X6"] = "RT";
 
@@ -706,7 +852,7 @@ void SingleModePage::onLoadFolder() {
     }
 }
 
-// [新增] 清空功能实现
+// 清空功能实现
 void SingleModePage::onClearFiles() {
     for (auto it = m_fileInputs.begin(); it != m_fileInputs.end(); ++it) {
         QLineEdit* edit = it.value();
@@ -714,7 +860,7 @@ void SingleModePage::onClearFiles() {
         edit->setProperty("fullPath", ""); // 清空存储的路径
         edit->setToolTip("");             // 清空提示
     }
-    // [新增] 清空内存数据和 3D 视图
+    // 清空内存数据和 3D 视图
     m_cloudData.clear();
     m_viewer->removeAllPointClouds();
     
@@ -728,7 +874,7 @@ void SingleModePage::onClearFiles() {
 }
 
 
-// [新增] 辅助函数：后续算法调用时，不能直接 edit->text()，因为那只是文件名
+// 辅助函数：后续算法调用时，不能直接 edit->text()，因为那只是文件名
 // 需要调用这个函数来获取真实路径
 QString SingleModePage::getFullPath(const QString& camKey) const {
     if (m_fileInputs.contains(camKey)) {
@@ -931,13 +1077,20 @@ void SingleModePage::applyPreprocessToMemory() {
         QString("已对 %1 个点云执行预处理并保存到内存。\n后续配准将使用新数据。").arg(count));
         
     // 刷新一下视图
-    onRunPreprocess(); 
+    // 遍历检查左侧面板哪些图层被勾选了，直接将内存中现成的结果刷新到视图
+    for (auto it = m_cloudData.begin(); it != m_cloudData.end(); ++it) {
+        QString key = it.key();
+        if (m_layerChecks.contains(key) && m_layerChecks[key]->isChecked()) {
+            // 利用你已经写好的 onLayerToggle 函数，强制重新加载该图层
+            onLayerToggle(key, true); 
+        }
+    }
 }
 
 void SingleModePage::initDefaultMatrices() {
     // 根据你的 pc_register.cpp 中的数据硬编码默认值
     // LB -> Top
-    Eigen::Matrix4f lb;
+    Eigen::Matrix4d lb;
     lb << 0.998144, 0.040452, 0.045531, 43.625172,
           0.049100, -0.092113, -0.994537, 1393.481567,
           -0.036037, 0.994927, -0.093928, 2062.417725,
@@ -945,7 +1098,7 @@ void SingleModePage::initDefaultMatrices() {
     m_transforms["LB"] = lb;
 
     // LT -> Top
-    Eigen::Matrix4f lt;
+    Eigen::Matrix4d lt;
     lt << 0.991525, 0.015493, 0.128988, -49.530918,
           0.125268, 0.149176, -0.980844, 1446.867676,
           -0.034438, 0.988689, 0.145971, 1454.759033,
@@ -953,7 +1106,7 @@ void SingleModePage::initDefaultMatrices() {
     m_transforms["LT"] = lt;
 
     // RB -> Top
-    Eigen::Matrix4f rb;
+    Eigen::Matrix4d rb;
     rb << -0.997376, 0.071718, 0.009833, 9.360316,
           0.006674, -0.044152, 0.999003, -1420.248047,
           0.072081, 0.996447, 0.043558, 1944.664185,
@@ -961,7 +1114,7 @@ void SingleModePage::initDefaultMatrices() {
     m_transforms["RB"] = rb;
 
     // RT -> Top
-    Eigen::Matrix4f rt;
+    Eigen::Matrix4d rt;
     rt << -0.993564, 0.102217, 0.048803, 11.873594,
           0.016009, -0.299805, 0.953866, -1409.841309,
           0.112133, 0.948509, 0.296239, 1245.285522,
@@ -970,22 +1123,22 @@ void SingleModePage::initDefaultMatrices() {
 }
 
 
-QString SingleModePage::matrixToString(const Eigen::Matrix4f& mat) {
+QString SingleModePage::matrixToString(const Eigen::Matrix4d& mat) {
     QString str;
     for(int i=0; i<4; ++i) {
         for(int j=0; j<4; ++j) {
             // 保留4位小数，右对齐
-            str += QString::number(mat(i,j), 'f', 4); 
-            if(j < 3) str += "  ";
+            str += QString::number(mat(i,j), 'f', 6); 
+            if(j < 3) str += "\t"; // 列间用制表符分隔
         }
         if(i < 3) str += "\n";
     }
     return str;
 }
 
-Eigen::Matrix4f SingleModePage::stringToMatrix(const QString& text) {
-    Eigen::Matrix4f mat = Eigen::Matrix4f::Identity();
-    QStringList tokens = text.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+Eigen::Matrix4d SingleModePage::stringToMatrix(const QString& text) {
+    Eigen::Matrix4d mat = Eigen::Matrix4d::Identity();
+    QStringList tokens = text.split(QRegularExpression("[\\s,]+"), Qt::SkipEmptyParts);
     if(tokens.size() == 16) {
         int idx = 0;
         for(int i=0; i<4; ++i) {
@@ -993,6 +1146,10 @@ Eigen::Matrix4f SingleModePage::stringToMatrix(const QString& text) {
                 mat(i,j) = tokens[idx++].toFloat();
             }
         }
+    }
+    else {
+        // 打印警告，如果解析失败，我们在后续逻辑中拦截
+        qDebug() << "[警告] 矩阵解析失败！提取到的数字个数不是16个，而是:" << tokens.size();
     }
     return mat;
 }
@@ -1011,6 +1168,22 @@ void SingleModePage::onMatrixTextChanged() {
 }
 
 void SingleModePage::onExecuteRegistration() {
+    // =========================================================
+    // 执行前，先同步界面上正在编辑的矩阵到内存
+    // 在执行耗时或关键的底层算法前，永远不要相信用户的输入。必须先强制把 UI 上的数据刷回内存，并进行合法性校验
+    // =========================================================
+    QString currentEditingKey = m_comboMatrixView->currentText();   // 获取选定的参考目标 (Target)
+    QString matrixText = m_textMatrix->toPlainText();
+    
+    // 简单的格式校验，Qt::SkipEmptyParts: 如果用户多敲了几个空格，切分出来的空字符串会被自动丢弃，防止解析错误
+    QStringList tokens = matrixText.split(QRegularExpression("[\\s,]+"), Qt::SkipEmptyParts);
+    if (tokens.size() == 16) {
+        m_transforms[currentEditingKey] = stringToMatrix(matrixText);
+    } else {
+        QMessageBox::warning(this, "矩阵格式错误", "当前编辑框中的矩阵数字不是16个，请检查！");
+        return; // 阻止执行，保护数据
+    }
+
     log("启动配准与融合流程...", "ALGO");
 
     // 1. 获取选定的参考目标 (Target)
@@ -1026,7 +1199,7 @@ void SingleModePage::onExecuteRegistration() {
 
     // 获取目标相对于 Top 的矩阵 (T_target_to_top)
     // 如果目标就是 Top，矩阵就是单位阵；否则从 map 里取
-    Eigen::Matrix4f matTargetToTop = Eigen::Matrix4f::Identity();
+    Eigen::Matrix4d matTargetToTop = Eigen::Matrix4d::Identity();
     if (targetKey != "Top") {
         if (!m_transforms.contains(targetKey)) {
              QMessageBox::warning(this, "错误", "参考目标 " + targetKey + " 尚未初始化矩阵。");
@@ -1035,9 +1208,20 @@ void SingleModePage::onExecuteRegistration() {
         matTargetToTop = m_transforms[targetKey];
     }
 
-    bool useICP = m_comboRegMethod->currentText().contains("ICP");
+    // 获取算法类型
+    // m_comboRegMethod 的 item 顺序是: 
+    // index 0: "手动矩阵 (Manual)"
+    // index 1: "ICP (P2Point)"
+    // index 2: "ICP (P2Plane)"
+    int methodIndex = m_comboRegMethod->currentIndex();
+    bool useICP = (methodIndex > 0); // 只要不是 0 都是 ICP
     
-    // [修复 1] 变量定义只保留这一次
+    // 转换 ComboBox 索引到算法枚举
+    // 界面 index 1 -> P2Point (枚举 0)
+    // 界面 index 2 -> P2Plane (枚举 1)
+    int algoType = (methodIndex == 2) ? PointCloudAlgo::P2Plane : PointCloudAlgo::P2Point;
+    
+    // 变量定义只保留这一次
     int processedCount = 0; 
     
     // =========================================================
@@ -1048,7 +1232,12 @@ void SingleModePage::onExecuteRegistration() {
     PointCloudT::Ptr geometryMerged(new PointCloudT);
     
     // 容器 B: 用于 3D 窗口显示的彩色点云 (m_mergedCloudRGB 是成员变量)
+    // 功能：确保 m_mergedCloudRGB 智能指针被正确初始化，并清空内部数据以备复用。
+    // 实现：通过判断指针是否为空来进行延迟初始化，使用 reset 接管新分配的堆内存，最后调用 clear 清空点云容器。
     if (!m_mergedCloudRGB) {
+        // 如果这是程序第一次运行到这里，指针是个空指针 (nullptr)
+        // new pcl::PointCloud... 会在堆内存(Heap)中开辟一块新的点云对象
+        // reset() 会让 m_mergedCloudRGB 这个智能指针“接管”这块新内存的所有权
         m_mergedCloudRGB.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
     }
     m_mergedCloudRGB->clear(); // 清空旧数据，准备重新拼接
@@ -1077,9 +1266,9 @@ void SingleModePage::onExecuteRegistration() {
 
     // --- 第一步：先加入 Target (基准) ---
     // Target 作为坐标原点，不需要变换，直接加进去
-    appendColoredCloud(cloudTarget, targetKey);
+    appendColoredCloud(cloudTarget, targetKey);     // cloudTarget是目标点云数据，targetKey 是目标点云相机名称
     
-    // --- 第二步：遍历 Sources (待配准源) ---
+    // --- 第二步：遍历 Sources (待配准源)（向目标点云对齐） ---
     for (auto it = m_sourceChecks.begin(); it != m_sourceChecks.end(); ++it) {
         QString srcKey = it.key(); 
         QCheckBox* chk = it.value();
@@ -1089,21 +1278,28 @@ void SingleModePage::onExecuteRegistration() {
             continue; 
         }
 
+        // 根据相机名称srcKey从m_cloudData中获取源点云数据
         PointCloudT::Ptr cloudSrc = m_cloudData[srcKey];
         
         // ---------------------------------------------------------
         // 数学计算：计算 T_src_to_target
         // ---------------------------------------------------------
-        Eigen::Matrix4f matSrcToTop_Current = m_transforms[srcKey];
-        // 猜测矩阵 = Target逆 * Source当前
-        Eigen::Matrix4f matSrcToTarget_Guess = matTargetToTop.inverse() * matSrcToTop_Current;
+        Eigen::Matrix4d matSrcToTop_Current = m_transforms[srcKey];
+        Eigen::Matrix4d matSrcToTarget_Guess = matTargetToTop.inverse()* matSrcToTop_Current; // 从 src 到 target 的初始猜测矩阵
 
-        Eigen::Matrix4f matSrcToTarget_Final = matSrcToTarget_Guess;
+
+        Eigen::Matrix4d matSrcToTarget_Final = matSrcToTarget_Guess;
         PointCloudT::Ptr cloudAlignedLocal; // 变换到 Target 坐标系的点云
 
         if (useICP) {
+            // [核心修改]：定义一个 Lambda 胶水函数
+            // [this] 捕获列表：让 Lambda 内部能访问当前类的成员函数 log
+            auto logBridge = [this](const QString& msg, const QString& type) {
+                // 在这里调用你那个漂亮的 log 函数
+                this->log(msg, type); 
+            };
             // 对 Target 进行 ICP
-            auto result = PointCloudAlgo::alignICP(cloudSrc, cloudTarget, matSrcToTarget_Guess, 30, 0.05);
+            auto result = PointCloudAlgo::alignICP(cloudSrc, cloudTarget, matSrcToTarget_Guess, 30, 0.05, algoType, logBridge);
             cloudAlignedLocal = result.first;
             matSrcToTarget_Final = result.second;
             log(QString("ICP [%1 -> %2] 收敛").arg(srcKey).arg(targetKey), "ALGO");
@@ -1116,7 +1312,7 @@ void SingleModePage::onExecuteRegistration() {
         // 结果回写：更新全局矩阵 T_src_to_top
         // T_src_to_top = T_target_to_top * T_src_to_target
         // ---------------------------------------------------------
-        Eigen::Matrix4f matSrcToTop_New = matTargetToTop * matSrcToTarget_Final;
+        Eigen::Matrix4d matSrcToTop_New = matTargetToTop * matSrcToTarget_Final;
         m_transforms[srcKey] = matSrcToTop_New; // 更新内存中的位置记录
         
         // [关键] 将变换后的点云，涂上 srcKey 的颜色，加入融合云
@@ -1200,4 +1396,46 @@ void SingleModePage::getCameraColor(const QString& camName, int& r, int& g, int&
     else if (camName == "RB")  { r = 255; g = 215; b = 0;   } // 金 (Right-Bottom)
     else if (camName == "RT")  { r = 0;   g = 255; b = 255; } // 青 (Right-Top)
     else                       { r = 255; g = 255; b = 255; } // 默认白
+}
+
+void SingleModePage::onExtractBody() {
+    // 1. 检查是否存在融合后的点云数据
+    if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty()) {
+        QMessageBox::warning(this, "警告", "没有找到融合后的点云！请先执行配准与融合。");
+        return;
+    }
+
+    // 2. 读取界面参数
+    double plane_thresh = m_spinRansacThresh->value();  // 平面检测阈值
+    double tol = m_spinExtractTol->value();             // 聚类提取的距离容差
+    int min_size = m_spinExtractMinSize->value();       // 聚类提取的最小点数
+
+    // 包装日志回调
+    auto logBridge = [this](const QString& msg, const QString& type) {
+        this->log(msg, type); 
+    };
+
+    // 3. 执行算法，提取主体
+    PointCloudT::Ptr bodyCloud = PointCloudAlgo::extractLargestCluster(
+        m_cloudData["Merged"], tol, min_size, plane_thresh, logBridge
+    );
+
+    // 4. 更新内存与 3D 视图
+    if (bodyCloud) {
+        // 保存到内存字典
+        m_cloudData["Body"] = bodyCloud;
+
+        // 【视觉优化】: 关闭“融合点云”图层，打开“提取主体”图层
+        // 这样画面中杂乱的背景会瞬间消失，只剩下粉色的干干净净的猪体
+        if (m_layerChecks.contains("Merged")) {
+            m_layerChecks["Merged"]->setChecked(false); // 触发 onLayerToggle 隐藏
+        }
+        
+        if (m_layerChecks.contains("Body")) {
+            m_layerChecks["Body"]->setChecked(true); // 触发 onLayerToggle 显示粉色
+            
+            // 手动调用一次确保视图刷新
+            onLayerToggle("Body", true);
+        }
+    }
 }
