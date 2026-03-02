@@ -2,11 +2,16 @@
 #include <QWidget>
 #include <QMap>
 #include <QTimer>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QHttpMultiPart>
+#include <QList>
 #include "core/PointCloudAlgo.h"
 // PCL 相关头文件
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/features/normal_3d_omp.h>
 
 // 前置声明，减少头文件依赖
 class QLineEdit;
@@ -16,7 +21,7 @@ class QDoubleSpinBox;
 class QSpinBox;
 class QTextEdit;
 class QComboBox; 
-
+class QLabel;
 
 // 定义点云类型别名，方便书写
 using PointT = pcl::PointXYZ;
@@ -54,6 +59,9 @@ private slots:
 
     // 执行主体提取的槽函数
     void onExtractBody();
+
+    // 运行关键点预测的槽函数
+    void onRunAIInference(); 
 
 private:
     // UI布局初始化函数，左侧面板、中心视图、右侧面板分别初始化
@@ -133,4 +141,27 @@ private:
     QDoubleSpinBox *m_spinExtractTol;
     QSpinBox *m_spinExtractMinSize;
     QDoubleSpinBox *m_spinRansacThresh; // 新增地面滤除阈值控件
+
+    void drawKeypointsInViewer(const std::vector<Eigen::Vector3f>& kps);    // 用于可视化模型预测的关键点位置
+
+    // 网络请求管理器 (用于发送点云到 Python 服务端)
+    QNetworkAccessManager *m_networkManager;
+    
+    // 存储关键点状态标签的指针，方便后续变绿
+    QList<QLabel*> m_kpBadges;
+
+    // [新增] 运行 AI 按钮的指针
+    QPushButton *m_btnRunAI;
+
+    // [新增] 手动拾取状态控制
+    bool m_isManualPickingMode = false;
+    int m_currentPickIndex = 0;
+    std::vector<Eigen::Vector3f> m_keypoints; // 存放当前的 6 个关键点 (AI预测的或手动拾取的)
+
+    // [新增] UI 状态辅助函数
+    void updateBadgeStyle(int index, int state); // state: 0=灰(未开始), 1=蓝(正在拾取), 2=绿(已完成)
+    void onManualPointPicked(double x, double y, double z); // 拾取到点后的处理逻辑
+
+    // [新增] 专门用于准备(或检查)关键点检测云的辅助函数
+    bool prepareKeypointsCloud();
 };

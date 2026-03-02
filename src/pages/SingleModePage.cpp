@@ -47,6 +47,10 @@ public:
     // 用于向 UI 打印日志的回调
     std::function<void(const QString&)> logger;
 
+    // [新增] 状态指针与回调函数
+    bool* isManualMode = nullptr;
+    std::function<void(double, double, double)> onPointPicked;
+
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
         vtkRenderWindowInteractor* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
         if (!iren || !style) return;
@@ -90,6 +94,7 @@ public:
             // 3. 左键双击 -> 拾取点并设置为旋转中心
             // ==========================================
             case vtkCommand::LeftButtonDoubleClickEvent:
+            {
                 style->FindPokedRenderer(x, y);
                 vtkRenderer* ren = style->GetCurrentRenderer();
                 if (ren) {
@@ -117,11 +122,17 @@ public:
                 }
                 this->AbortFlagOn();
                 break;
+            }
+            default:
+                break; // 其他事件不处理，交给 VTK 默认逻辑
         }
     }
 };
 
 SingleModePage::SingleModePage(QWidget *parent) : QWidget(parent) {
+    // 初始化网络管理器
+    m_networkManager = new QNetworkAccessManager(this);
+
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
@@ -220,7 +231,8 @@ void SingleModePage::initLeftPanel() {
         {"RT",  "Right-Top", "cyan"},
         // 下面这俩暂时还没数据，先占位
         {"Merged", "✨ 融合后点云", "white"},
-        {"Body",   "🐷 提取主体", "pink"}
+        {"Body",   "🐷 提取主体", "pink"},
+        {"Keypoints", "🎯 关键点检测云", "orange"}
     };
 
     for(const auto& layer : layers) {
@@ -288,6 +300,23 @@ void SingleModePage::initCenterView() {
     m_viewer->initCameraParameters();               // 初始化相机视角
 
     // =========================================================
+    // [修复] 接入 PCL 工业级原生拾取事件 (默认绑定 Shift + 左键)
+    // =========================================================
+    m_viewer->registerPointPickingCallback([this](const pcl::visualization::PointPickingEvent& event) {
+        // 如果没有选中任何有效点，直接返回
+        if (event.getPointIndex() == -1) return;
+        
+        // 只有在用户点击了"手动拾取"按钮进入模式后，才处理点击事件
+        if (!m_isManualPickingMode) return;
+
+        float x, y, z;
+        event.getPoint(x, y, z);
+        
+        // 调用我们之前写好的状态推进与渲染函数
+        this->onManualPointPicked(x, y, z);
+    });
+
+    // =========================================================
     // [新增] 注入 CloudCompare 风格鼠标交互
     // =========================================================
     vtkRenderWindowInteractor* iren = m_viewer->getRenderWindow()->GetInteractor();
@@ -299,9 +328,11 @@ void SingleModePage::initCenterView() {
         vtkSmartPointer<CloudCompareMouseCallback> ccCallback = vtkSmartPointer<CloudCompareMouseCallback>::New();
         ccCallback->style = style;
         
-        // 绑定日志输出 Lambda，使用前面写好的漂亮 log 函数
-        ccCallback->logger = [this](const QString& msg) { 
-            this->log(msg, "INFO"); 
+
+        // [新增] 绑定手动拾取的变量和 Lambda 回调
+        ccCallback->isManualMode = &m_isManualPickingMode;
+        ccCallback->onPointPicked = [this](double x, double y, double z) {
+            this->onManualPointPicked(x, y, z);
         };
 
         // AddObserver 的第三个参数 1.0 表示“高优先级”
@@ -672,10 +703,11 @@ void SingleModePage::initRightPanel() {
 
     aiLay->addWidget(fileFrame);
 
-    QPushButton *btnRunAI = new QPushButton("⚡ 运行模型推理");
-    btnRunAI->setObjectName("WarningBtn"); // 橙色按钮 QSS
-    btnRunAI->setFixedHeight(32);
-    aiLay->addWidget(btnRunAI);
+    m_btnRunAI = new QPushButton("⚡ 运行模型推理");
+    m_btnRunAI->setObjectName("WarningBtn"); 
+    m_btnRunAI->setFixedHeight(32);
+    aiLay->addWidget(m_btnRunAI);
+    connect(m_btnRunAI, &QPushButton::clicked, this, &SingleModePage::onRunAIInference);  // 连接推理按钮 -> 触发 AI 推理处理
 
     lay4->addWidget(aiWidget);
 
@@ -686,8 +718,67 @@ void SingleModePage::initRightPanel() {
         // 实际开发中建议单独写 slot
     });
     // 修正：直接连接 lambda
-    connect(btnManual, &QPushButton::toggled, [aiWidget](bool checked){
-        aiWidget->setVisible(!checked);
+    connect(btnManual, &QPushButton::toggled, this, [this, aiWidget, btnManual](bool checked){
+        aiWidget->setVisible(!checked); // 隐藏/显示 AI 面板
+        
+        if (checked) {
+            // [新增] 尝试准备点云
+            if (!prepareKeypointsCloud()) {
+                // 准备失败，强行将手动拾取按钮恢复到未选中状态
+                btnManual->blockSignals(true);
+                btnManual->setChecked(false);
+                btnManual->blockSignals(false);
+                aiWidget->setVisible(true);
+                return;
+            }
+
+            // 准备成功，切换显示图层
+            for(auto* chk : m_layerChecks) { chk->setChecked(false); }
+            if (m_layerChecks.contains("Keypoints")) {
+                m_layerChecks["Keypoints"]->setChecked(true);
+                onLayerToggle("Keypoints", true);
+            }
+
+            // ==== 进入手动模式 ====
+            m_isManualPickingMode = true;
+            log("进入手动拾取模式。请按住 [Shift + 鼠标左键] 在点云上拾取 [P1 耳中]", "ALGO");
+            
+            m_keypoints.clear();      // 清空旧数据
+            m_currentPickIndex = 0;   // 重置索引
+            
+            // 清理 3D 视图上的旧球体
+            for (int i = 0; i < 10; ++i) { 
+                m_viewer->removeShape("kp_sphere_" + std::to_string(i));
+                m_viewer->removeText3D("kp_text_" + std::to_string(i));
+            }
+            m_viewer->getRenderWindow()->Render();
+
+            // 重置所有 Badge：第一个蓝色，其余灰色
+            for (int i = 0; i < 6; ++i) {
+                updateBadgeStyle(i, (i == 0) ? 1 : 0);
+            }
+        } else {
+            // ==== 退出手动模式 (切换回 AI 模式) ====
+            m_isManualPickingMode = false;
+            
+            // [新增] 1. 清空内部存储的点数据
+            m_keypoints.clear();
+            
+            // [新增] 2. 清理 3D 视图上的旧球体和文字
+            for (int i = 0; i < 10; ++i) { 
+                m_viewer->removeShape("kp_sphere_" + std::to_string(i));
+                m_viewer->removeText3D("kp_text_" + std::to_string(i));
+            }
+            m_viewer->getRenderWindow()->Render();
+
+            // [修改] 3. 将所有 6 个 Badge 状态全部重置为灰色
+            // 因为数据已经清空了，UI 应该恢复到未检测的初始状态
+            for (int i = 0; i < 6; ++i) {
+                updateBadgeStyle(i, 0); 
+            }
+            
+            log("已退出手动拾取模式，切换回 AI 自动检测。旧数据已清空。", "INFO");
+        }
     });
 
     // --- 关键点状态网格 ---
@@ -698,16 +789,23 @@ void SingleModePage::initRightPanel() {
     QGridLayout *gridKp = new QGridLayout();
     gridKp->setSpacing(6);
     QStringList kps = {"P1 耳中", "P2 肩胛", "P3 背中", "P4 腰", "P5 臀", "P6 尾根"};
-    
+    m_kpBadges.clear(); // 清空
+
+    // 在 initRightPanel() 函数中，找到创建 QLabel 的循环
     for(int i=0; i<kps.size(); ++i) {
         QLabel *badge = new QLabel(kps[i]);
-        badge->setObjectName("KpBadge"); // QSS
-        // 模拟：前3个检测到了，后3个没检测到
-        if(i < 3) {
-            badge->setProperty("detected", true);
-        } else {
-            badge->setProperty("detected", false);
-        }
+        badge->setAlignment(Qt::AlignCenter); // [新增] 文字居中对齐，更好看
+        
+        // [新增] 默认统一使用灰色“未激活”样式
+        badge->setStyleSheet(
+            "background-color: #f4f4f5; "
+            "color: #909399; "
+            "border: 1px solid #d3d4d6; "
+            "border-radius: 4px; "
+            "padding: 4px;"
+        );
+        
+        m_kpBadges.append(badge); 
         gridKp->addWidget(badge, i/3, i%3);
     }
     lay4->addLayout(gridKp);
@@ -1398,6 +1496,7 @@ void SingleModePage::getCameraColor(const QString& camName, int& r, int& g, int&
     else                       { r = 255; g = 255; b = 255; } // 默认白
 }
 
+// 实现主体精细提取的槽函数
 void SingleModePage::onExtractBody() {
     // 1. 检查是否存在融合后的点云数据
     if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty()) {
@@ -1438,4 +1537,274 @@ void SingleModePage::onExtractBody() {
             onLayerToggle("Body", true);
         }
     }
+}
+
+
+// 在 PCL 视图中绘制关键点的辅助函数
+void SingleModePage::drawKeypointsInViewer(const std::vector<Eigen::Vector3f>& kps) {
+    if (!m_viewer) return;
+
+    QStringList kpNames = {"P1", "P2", "P3", "P4", "P5", "P6"};
+
+    // 每次绘制前，先清除上一轮画的关键点形状
+    for (int i = 0; i < 10; ++i) { 
+        m_viewer->removeShape("kp_sphere_" + std::to_string(i));
+        m_viewer->removeText3D("kp_text_" + std::to_string(i));
+    }
+
+    for (size_t i = 0; i < kps.size() && i < kpNames.size(); ++i) {
+        pcl::PointXYZ pt(kps[i].x(), kps[i].y(), kps[i].z());
+        
+        std::string sphereId = "kp_sphere_" + std::to_string(i);
+        std::string textId = "kp_text_" + std::to_string(i);
+
+        // 1. 添加红色的 3D 球体 (半径 15mm，视你的猪体大小而定)
+        m_viewer->addSphere(pt, 15.0, 1.0, 0.0, 0.0, sphereId);
+        
+        // 2. 在球体旁边稍微偏上一点的地方添加文字标签
+        pcl::PointXYZ textPt(pt.x, pt.y, pt.z + 20.0); 
+        m_viewer->addText3D(kpNames[i].toStdString(), textPt, 15.0, 1.0, 1.0, 1.0, textId);
+    }
+
+    m_viewer->getRenderWindow()->Render();
+}
+
+
+
+/*
+ * 作用：执行 AI 模型推理 (客户端侧逻辑)
+ * 功能：提取背部点云 -> 计算法线与曲率特征 -> 序列化为 N*7 的二进制流 -> 通过 HTTP POST 发送给 WSL2 中的 Python 服务 -> 异步接收解析关键点坐标 -> 渲染到 3D 视图。
+ * 实现机制：使用 PCL 的 NormalEstimationOMP 计算特征；使用 reinterpret_cast 强转指针实现零拷贝级别的二进制打包；使用 QNetworkAccessManager 实现非阻塞异步通信。
+ */
+void SingleModePage::onRunAIInference() {
+    // [修改] 用封装好的函数代替之前长长的提取代码
+    if (!prepareKeypointsCloud()) {
+        return; // 如果准备失败（比如没有 Top 视角），直接中止
+    }
+    // 从内存中把刚准备好的背部点云取出来，赋给 backCloud 变量
+    PointCloudT::Ptr backCloud = m_cloudData["Keypoints"];
+
+    // 切换图层显示，专注显示关键点云
+    for(auto* chk : m_layerChecks) { chk->setChecked(false); }
+    if (m_layerChecks.contains("Keypoints")) {
+        m_layerChecks["Keypoints"]->setChecked(true);
+        onLayerToggle("Keypoints", true);
+    }
+
+    // ==========================================================
+    // 3. 计算法向量与曲率特征 (N * 4) -> 组合成 N * 7
+    // ==========================================================
+    log("正在计算点云法线与曲率特征...", "ALGO");
+    pcl::NormalEstimationOMP<PointT, pcl::PointNormal> ne;
+    pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>());
+    ne.setSearchMethod(tree);
+    ne.setInputCloud(backCloud);
+    ne.setRadiusSearch(50.0); // 根据实际猪体尺寸调整搜索半径
+
+    pcl::PointCloud<pcl::PointNormal>::Ptr cloud_normals(new pcl::PointCloud<pcl::PointNormal>);
+    ne.compute(*cloud_normals);
+
+    // ==========================================================
+    // 4. 将数据打包为紧凑的二进制字节流 (QByteArray)
+    // 格式: [x1, y1, z1, nx1, ny1, nz1, cur1, x2, y2, z2, nx2...]
+    // ==========================================================
+    int numPoints = backCloud->size();
+    QByteArray postData;
+    postData.resize(numPoints * 7 * sizeof(float)); // 预分配内存，7个float = 28字节/点
+    
+    // 使用指针直接写入内存，速度极快
+    float* ptr = reinterpret_cast<float*>(postData.data());
+    for (int i = 0; i < numPoints; ++i) {
+        *ptr++ = backCloud->points[i].x;
+        *ptr++ = backCloud->points[i].y;
+        *ptr++ = backCloud->points[i].z;
+        *ptr++ = cloud_normals->points[i].normal_x;
+        *ptr++ = cloud_normals->points[i].normal_y;
+        *ptr++ = cloud_normals->points[i].normal_z;
+        *ptr++ = cloud_normals->points[i].curvature;
+    }
+
+    // ==========================================================
+    // 5. 构建并发送 HTTP POST 请求
+    // ==========================================================
+    log("正在发送数据至 AI 服务器(WSL2)执行推理...", "INFO");
+    
+    // 使用 QHttpMultiPart 构建表单数据，匹配 FastAPI 的 UploadFile
+    QHttpMultiPart *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+    QHttpPart filePart;
+    filePart.setHeader(QNetworkRequest::ContentDispositionHeader, 
+                       QVariant("form-data; name=\"file\"; filename=\"pointcloud.bin\""));
+    filePart.setBody(postData);
+    multiPart->append(filePart);
+
+    QNetworkRequest request(QUrl("http://127.0.0.1:8000/predict"));
+    
+    // 发送请求
+    QNetworkReply *reply = m_networkManager->post(request, multiPart);
+    multiPart->setParent(reply); // 随 reply 一起自动销毁，防止内存泄漏
+
+    // [可选] 禁用按钮防止重复点击
+    m_btnRunAI->setEnabled(false); m_btnRunAI->setText("推理中...");
+
+    // ==========================================================
+    // 6. 异步处理返回结果 (C++11 Lambda 回调)
+    // ==========================================================
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() == QNetworkReply::NoError) {
+            // 读取返回的二进制数据
+            QByteArray responseData = reply->readAll();
+            int numKeypoints = responseData.size() / (3 * sizeof(float));
+            
+            if (numKeypoints > 0) {
+                const float* outPtr = reinterpret_cast<const float*>(responseData.constData());
+                
+                // ---------------------------------------------------------
+                // [核心修改 1]：不再使用局部变量，而是直接操作成员变量 m_keypoints
+                // 每次 AI 重新推理成功时，必须先清空旧数据（包括之前手动点的或上次AI算的）
+                // ---------------------------------------------------------
+                this->m_keypoints.clear();
+                
+                // 遍历解析坐标并存入类成员变量
+                for (int i = 0; i < numKeypoints; ++i) {
+                    float kx = outPtr[i*3 + 0];
+                    float ky = outPtr[i*3 + 1];
+                    float kz = outPtr[i*3 + 2];
+                    this->m_keypoints.push_back(Eigen::Vector3f(kx, ky, kz));
+                }
+
+                log(QString("AI 推理成功！检测到 %1 个关键点。").arg(numKeypoints), "SUCCESS");
+                
+                // ---------------------------------------------------------
+                // 1. 在控制台输出所有关键点的绝对三维坐标
+                // ---------------------------------------------------------
+                QStringList kpNames = {"P1 耳中", "P2 肩胛", "P3 背中", "P4 腰", "P5 臀", "P6 尾根"};
+                for (int i = 0; i < numKeypoints && i < kpNames.size(); ++i) {
+                    // [核心修改 2]：从 this->m_keypoints 中读取坐标进行打印
+                    QString coordMsg = QString("  ▶ %1: (X: %2, Y: %3, Z: %4) mm")
+                                        .arg(kpNames[i])
+                                        .arg(this->m_keypoints[i].x(), 0, 'f', 2)
+                                        .arg(this->m_keypoints[i].y(), 0, 'f', 2)
+                                        .arg(this->m_keypoints[i].z(), 0, 'f', 2);
+                    log(coordMsg, "INFO");
+                }
+
+                // 2. 在 3D 视图中渲染
+                // [核心修改 3]：将成员变量传给渲染函数
+                this->drawKeypointsInViewer(this->m_keypoints);
+
+                // 3. 更新界面 UI 网格 (让 Badge 变绿)
+                for (int i = 0; i < m_kpBadges.size(); ++i) {
+                    if (i < numKeypoints) {
+                        m_kpBadges[i]->setStyleSheet(
+                            "background-color: #f0f9eb; color: #67c23a; "
+                            "border: 1px solid #c2e7b0; border-radius: 4px; "
+                            "padding: 4px; font-weight: bold;"
+                        );
+                    } else {
+                        m_kpBadges[i]->setStyleSheet(
+                            "background-color: #f4f4f5; color: #909399; "
+                            "border: 1px solid #d3d4d6; border-radius: 4px; padding: 4px;"
+                        );
+                    }
+                }
+            } else {
+                log("服务端返回的数据为空或不合法！", "ERROR");
+            }
+        } else {
+            // 网络通信错误处理
+            log("AI 推理失败: " + reply->errorString(), "ERROR");
+        }
+        
+        reply->deleteLater(); // 释放内存
+        
+        // 恢复 AI 按钮状态（如果你采用了成员变量 m_btnRunAI）
+        if (m_btnRunAI) {
+            m_btnRunAI->setEnabled(true); 
+            m_btnRunAI->setText("⚡ 运行模型推理");
+        }
+    });
+}
+
+// 辅助函数：统一管理 Badge 的三种颜色状态
+void SingleModePage::updateBadgeStyle(int index, int state) {
+    if (index < 0 || index >= m_kpBadges.size()) return;
+    
+    QLabel* badge = m_kpBadges[index];
+    if (state == 0) { // 灰色 (未完成)
+        badge->setStyleSheet("background-color: #f4f4f5; color: #909399; border: 1px solid #d3d4d6; border-radius: 4px; padding: 4px;");
+    } else if (state == 1) { // 蓝色 (正在等待拾取该点)
+        badge->setStyleSheet("background-color: #ecf5ff; color: #409eff; border: 1px solid #b3d8ff; border-radius: 4px; padding: 4px; font-weight: bold;");
+    } else if (state == 2) { // 绿色 (已完成拾取/预测)
+        badge->setStyleSheet("background-color: #f0f9eb; color: #67c23a; border: 1px solid #c2e7b0; border-radius: 4px; padding: 4px; font-weight: bold;");
+    }
+}
+
+// 核心逻辑：当用户 Shift+左键 成功点到一个点时触发
+void SingleModePage::onManualPointPicked(double x, double y, double z) {
+    if (!m_isManualPickingMode || m_currentPickIndex >= 6) return;
+
+    QStringList kpNames = {"P1 耳中", "P2 肩胛", "P3 背中", "P4 腰", "P5 臀", "P6 尾根"};
+    
+    // 1. 保存坐标
+    m_keypoints.push_back(Eigen::Vector3f(x, y, z));
+
+    // 2. 打印控制台日志
+    QString coordMsg = QString("  ▶ 手动拾取 %1: (X: %2, Y: %3, Z: %4) mm")
+                        .arg(kpNames[m_currentPickIndex])
+                        .arg(x, 0, 'f', 2).arg(y, 0, 'f', 2).arg(z, 0, 'f', 2);
+    log(coordMsg, "SUCCESS");
+
+    // 3. 将当前 Badge 设为绿色
+    updateBadgeStyle(m_currentPickIndex, 2);
+
+    // 4. 在 3D 视图中渲染（复用你之前的函数）
+    drawKeypointsInViewer(m_keypoints);
+
+    // 5. 游标前进，高亮下一个 Badge 为蓝色
+    m_currentPickIndex++;
+    if (m_currentPickIndex < 6) {
+        updateBadgeStyle(m_currentPickIndex, 1);
+        log(QString("请按住 Shift+左键 拾取下一个点: [%1]").arg(kpNames[m_currentPickIndex]), "INFO");
+    } else {
+        log("🎉 6 个关键点已全部手动拾取完毕！", "SUCCESS");
+        m_isManualPickingMode = false; // 自动退出拾取模式
+        // 这里你也可以触发后续的“计算体尺参数”逻辑
+    }
+}
+
+// [新增] 检查并生成关键点检测专用的点云
+bool SingleModePage::prepareKeypointsCloud() {
+    // 1. 如果已经存在，说明之前生成过，直接返回成功
+    if (m_cloudData.contains("Keypoints") && !m_cloudData["Keypoints"]->empty()) {
+        return true; 
+    }
+
+    // 2. 如果不存在，检查前置依赖 (Top 点云)
+    if (!m_cloudData.contains("Top") || m_cloudData["Top"]->empty()) {
+        QMessageBox::warning(this, "错误", "缺少 Top 相机点云，无法提取背部特征！");
+        return false;
+    }
+
+    log("开始准备关键点检测云 (提取背部点云)...", "ALGO");
+    
+    // 参数设置
+    double plane_thresh = 15.0; 
+    double tol = 50.0;          
+    int min_size = 1000;        
+
+    auto logBridge = [this](const QString& msg, const QString& type) { this->log(msg, type); };
+    
+    // 调用算法提取
+    PointCloudT::Ptr backCloud = PointCloudAlgo::extractLargestCluster(
+        m_cloudData["Top"], tol, min_size, plane_thresh, logBridge
+    );
+
+    if (!backCloud) {
+        log("背部点云提取失败，无法进行标注！", "ERROR");
+        return false;
+    }
+
+    // 存入内存
+    m_cloudData["Keypoints"] = backCloud;
+    return true;
 }

@@ -11,7 +11,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_PREFIX_PATH "F:/dev/Qt/6.9.3/msvc2022_64")
 
 # 2. [核心修复] 查找库时，必须加上 OpenGLWidgets
-find_package(Qt6 COMPONENTS Widgets Gui Core OpenGLWidgets REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Gui Core OpenGLWidgets Network REQUIRED)
 
 # 3. 包含头文件目录
 include_directories(include)
@@ -35,6 +35,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Gui 
     Qt6::Core 
     Qt6::OpenGLWidgets  # 现在上面 find_package 找到了，这里才能链接成功
+    Qt6::Network
     ${PCL_LIBRARIES}
 )
 
