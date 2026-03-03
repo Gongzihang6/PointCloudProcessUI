@@ -63,6 +63,8 @@ private slots:
     // 运行关键点预测的槽函数
     void onRunAIInference(); 
 
+    // 计算体尺参数的槽函数
+    void onCalculateBodySize();
 private:
     // UI布局初始化函数，左侧面板、中心视图、右侧面板分别初始化
     void initLeftPanel();
@@ -164,4 +166,10 @@ private:
 
     // [新增] 专门用于准备(或检查)关键点检测云的辅助函数
     bool prepareKeypointsCloud();
+
+    // 体尺参数控件
+    QDoubleSpinBox *m_spinGirthThick;  // 切片厚度
+    QDoubleSpinBox *m_spinSkelStep;    // 骨架步长
+    QDoubleSpinBox *m_spinSkelRadius;  // 骨架搜索半径
+    QDoubleSpinBox *m_spinHeightAngle; // 地面法线角度阈值
 };

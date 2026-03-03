@@ -15,7 +15,11 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/surface/mls.h>
-
+#include <pcl/common/pca.h>
+#include <pcl/common/common.h>
+#include <pcl/sample_consensus/sac_model_plane.h>
+#include <algorithm>
+#include <cmath>
 
 #include <functional> // 用于 std::function
 #include <QString>
@@ -24,13 +28,48 @@
 using PointT = pcl::PointXYZ;
 using PointCloudT = pcl::PointCloud<PointT>;
 
-// [新增] 定义带法线的点云类型 (用于点到面 ICP)
+// 定义带法线的点云类型 (用于点到面 ICP)
 using PointNormalT = pcl::PointNormal;
 using PointCloudNormalT = pcl::PointCloud<PointNormalT>;
 
+// 封装体尺计算相关数据
+struct BodySizeResults {
+    // 1. 数值结果
+    double body_length = 0.0;
+    double body_height = 0.0;
+    double body_width = 0.0;
+    double chest_girth = 0.0;
+    double waist_girth = 0.0;
+    double hip_girth = 0.0;
+
+    // 2. 变换后的数据 (供可视化用)
+    PointCloudT::Ptr aligned_cloud;        // PCA对齐后的完整/主体点云
+    std::vector<PointT> aligned_keypoints; // PCA对齐后的6个关键点
+    PointCloudT::Ptr skeleton_cloud;       // 骨架点云
+
+    // 3. 测量线/轮廓的端点图元 (供画线用)
+    PointT height_top, height_bottom;      // 体高线段端点
+    PointT width_p1, width_p2;             // 体宽线段端点
+    PointCloudT::Ptr chest_contour;        // 胸围轮廓线
+    PointCloudT::Ptr waist_contour;        // 腰围轮廓线
+    PointCloudT::Ptr hip_contour;          // 臀围轮廓线
+    PointCloudT::Ptr ground_polygon;       // 地面表示多边形 (4个顶点)
+};
+
+
+// 辅助结构体，用于周长计算时的极坐标点排序
+struct PolarPoint {
+    float r; // 半径
+    float theta; // 角度 (弧度)
+    bool operator < (const PolarPoint& other) const {
+        return theta < other.theta;
+    }
+};
+
+
 class PointCloudAlgo {
 public:
-    // [新增] 定义枚举，让代码更具可读性
+    // 定义枚举，让代码更具可读性
     enum RegistrationMethod {
         P2Point = 0, // 点到点
         P2Plane = 1  // 点到面
@@ -79,8 +118,36 @@ public:
         std::function<void(const QString&, const QString&)> logger = nullptr
     );
 
+    // 整合的体尺计算主干函数
+    static BodySizeResults calculateAllMeasurements(
+        PointCloudT::Ptr cloud_body,    // 干净的主体点云
+        PointCloudT::Ptr cloud_merged,  // 包含地面的融合点云
+        const std::vector<Eigen::Vector3f>& keypoints_eigen,
+        float girth_thick, 
+        float skel_step, 
+        float skel_radius, 
+        float height_angle,
+        std::function<void(const QString&, const QString&)> logger = nullptr);
 
 private:
     // 内部辅助函数：将点云转换为带法线的点云 (用于点到面 ICP)
     static PointCloudNormalT::Ptr computeNormals(PointCloudT::Ptr cloud_in, double radius);
+
+    static Eigen::Affine3f pca_transform(PointCloudT::Ptr cloud_in, PointCloudT::Ptr& cloud_out, const std::vector<PointT>& kps);
+    static PointCloudT::Ptr compute_surface_back_skeleton(const PointCloudT::Ptr& cloud, const std::vector<PointT>& kps, float step, float radius, int smooth_win);
+    static double calculate_body_length(const PointCloudT::Ptr& skel);
+    static double calculate_body_height(PointCloudT::Ptr pig_cloud, const std::vector<PointT>& kps, const PointCloudT::Ptr& skel, PointT& top_pt, PointT& bottom_pt, PointCloudT::Ptr& ground_poly, double angle_thresh);
+    static PointCloudT::Ptr remove_limbs(const PointCloudT::Ptr& cloud, const std::vector<PointT>& kps, const PointT& p_max);
+    static double calculate_body_width(const PointCloudT::Ptr& cloud, const std::vector<PointT>& kps, const PointCloudT::Ptr& skel, PointT& p1, PointT& p2);
+    static double calculate_girth_from_points(const PointCloudT::Ptr& points_cloud);
+    static double calculate_girth_unified_robust(const PointCloudT::Ptr& pig_cloud, const PointCloudT::Ptr& slice_cloud_3d, const PointT& slice_origin, const Eigen::Vector3f& slice_normal, PointCloudT::Ptr contour_out);
+    static double calculate_waist_girth(const PointCloudT::Ptr& pig_cloud, float thickness, const std::vector<PointT>& all_keypoints, PointT& p_max_out, const PointCloudT::Ptr& skeleton_cloud, PointCloudT::Ptr contour_out);
+    static double calculate_chest_girth(const PointCloudT::Ptr& body_cloud, float thickness, const std::vector<PointT>& all_keypoints, const PointCloudT::Ptr& skeleton_cloud, PointCloudT::Ptr contour_out);
+    static double calculate_hip_girth(const PointCloudT::Ptr& body_cloud, float thickness, const std::vector<PointT>& all_keypoints, const PointCloudT::Ptr& skeleton_cloud, PointCloudT::Ptr contour_out);
+    static float evaluate_catmull_rom_spline_1d(float v0, float v1, float v2, float v3, float t);
+    static std::vector<float> smooth_data_moving_average(const std::vector<float>& data, int window_size);
+    static std::pair<PointT, Eigen::Vector3f> get_skeleton_tangent_at_keypoint(const PointT& keypoint, const PointCloudT::Ptr& skeleton_cloud);
 };
+
+
+

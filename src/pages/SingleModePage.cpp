@@ -810,13 +810,38 @@ void SingleModePage::initRightPanel() {
     }
     lay4->addLayout(gridKp);
 
-    // 计算按钮
+    // 计算体尺参数
+    // =================================================
+    // 在 btnCalc 创建之前，添加体尺算法参数
+    // =================================================
+    auto *measParamLay = new QGridLayout();
+    measParamLay->setSpacing(5);
+    
+    measParamLay->addWidget(new QLabel("周长切片厚度(mm):"), 0, 0);
+    m_spinGirthThick = new QDoubleSpinBox(); m_spinGirthThick->setRange(1.0, 50.0); m_spinGirthThick->setValue(10.0);
+    measParamLay->addWidget(m_spinGirthThick, 0, 1);
+
+    measParamLay->addWidget(new QLabel("骨架采样步长(mm):"), 1, 0);
+    m_spinSkelStep = new QDoubleSpinBox(); m_spinSkelStep->setRange(5.0, 50.0); m_spinSkelStep->setValue(20.0);
+    measParamLay->addWidget(m_spinSkelStep, 1, 1);
+
+    measParamLay->addWidget(new QLabel("骨架搜索半径(mm):"), 2, 0);
+    m_spinSkelRadius = new QDoubleSpinBox(); m_spinSkelRadius->setRange(10.0, 100.0); m_spinSkelRadius->setValue(30.0);
+    measParamLay->addWidget(m_spinSkelRadius, 2, 1);
+
+    measParamLay->addWidget(new QLabel("地面法向容差(度):"), 3, 0);
+    m_spinHeightAngle = new QDoubleSpinBox(); m_spinHeightAngle->setRange(1.0, 45.0); m_spinHeightAngle->setValue(15.0);
+    measParamLay->addWidget(m_spinHeightAngle, 3, 1);
+
+    lay4->addLayout(measParamLay);
+
     QPushButton *btnCalc = new QPushButton("📏 计算体尺参数");
     btnCalc->setObjectName("PrimaryBtn");
     btnCalc->setMinimumHeight(45);
     btnCalc->setStyleSheet("margin-top: 5px; font-weight: bold; font-size: 14px;");
     lay4->addWidget(btnCalc);
-
+    // [新增] 绑定槽函数
+    connect(btnCalc, &QPushButton::clicked, this, &SingleModePage::onCalculateBodySize);
     box4->setContentLayout(lay4);
     scrollLayout->addWidget(box4);
 
@@ -1807,4 +1832,123 @@ bool SingleModePage::prepareKeypointsCloud() {
     // 存入内存
     m_cloudData["Keypoints"] = backCloud;
     return true;
+}
+
+
+void SingleModePage::onCalculateBodySize() {
+    // 1. 检查数据前置条件
+    if (m_keypoints.size() != 6) {
+        QMessageBox::warning(this, "警告", "关键点未准备就绪！请确保 6 个关键点已全部检测或手动拾取。");
+        return;
+    }
+    
+    // 必须同时拥有 Merged 和 Body 两个图层的数据
+    if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty() ||
+        !m_cloudData.contains("Body") || m_cloudData["Body"]->empty()) {
+        QMessageBox::warning(this, "警告", "缺少主体或融合点云数据！请先执行配准融合并提取主体。");
+        return;
+    }
+
+    log("开始执行体尺自动计算流水线...", "ALGO");
+
+    // 2. 收集参数
+    float girth_thick = m_spinGirthThick->value();
+    float skel_step = m_spinSkelStep->value();
+    float skel_radius = m_spinSkelRadius->value();
+    float height_angle = m_spinHeightAngle->value();
+
+    // 3. 调用底层的整合算法 (这里需要你在 PointCloudAlgo 中实现一个聚合函数)
+    // 深拷贝两份数据，分别传入算法
+    PointCloudT::Ptr cloud_body(new PointCloudT(*m_cloudData["Body"]));
+    PointCloudT::Ptr cloud_merged(new PointCloudT(*m_cloudData["Merged"]));
+    
+    BodySizeResults results = PointCloudAlgo::calculateAllMeasurements(
+        cloud_body, cloud_merged, m_keypoints, 
+        girth_thick, skel_step, skel_radius, height_angle,
+        [this](const QString& msg, const QString& type){ this->log(msg, type); }
+    );
+
+    if (!results.aligned_cloud || results.aligned_cloud->empty()) {
+        log("体尺计算失败！", "ERROR");
+        return;
+    }
+
+    // ==========================================================
+    // 4. 清理旧视图并渲染新视图 (Qt/PCL 渲染逻辑)
+    // ==========================================================
+    m_viewer->removeAllPointClouds();
+    m_viewer->removeAllShapes();
+
+    // A. 渲染 PCA 对齐后的主体点云
+    pcl::visualization::PointCloudColorHandlerCustom<PointT> body_color(results.aligned_cloud, 200, 200, 200);
+    m_viewer->addPointCloud<PointT>(results.aligned_cloud, body_color, "measure_body_cloud");
+    m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.4, "measure_body_cloud"); // 半透明，凸显线框
+
+    // B. 渲染 6 个对齐后的关键点
+    // 渲染对齐后的关键点 (红球)
+    // 将 PCL 的 PointT 转换为 Eigen::Vector3f 以适配 drawKeypointsInViewer 函数
+    std::vector<Eigen::Vector3f> eigen_kps;
+    for (const auto& pt : results.aligned_keypoints) {
+        eigen_kps.push_back(Eigen::Vector3f(pt.x, pt.y, pt.z));
+    }
+    drawKeypointsInViewer(eigen_kps);
+
+    // C. 渲染骨架 (绿色)
+    if (results.skeleton_cloud && results.skeleton_cloud->size() > 1) {
+        pcl::visualization::PointCloudColorHandlerCustom<PointT> skel_color(results.skeleton_cloud, 0, 255, 0);
+        m_viewer->addPointCloud<PointT>(results.skeleton_cloud, skel_color, "skel_pts");
+        m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, "skel_pts");
+        for (size_t i = 0; i < results.skeleton_cloud->size() - 1; ++i) {
+            m_viewer->addLine<PointT>(results.skeleton_cloud->points[i], results.skeleton_cloud->points[i+1], 0, 1.0, 0, "skel_line_" + std::to_string(i));
+            m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, "skel_line_" + std::to_string(i));
+        }
+    }
+
+    // 渲染地面多边形 (半透明绿色)
+    if (results.ground_polygon && results.ground_polygon->size() == 4) {
+        m_viewer->addPolygon<PointT>(results.ground_polygon, 0.0, 1.0, 0.0, "ground_plane");
+        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_REPRESENTATION, pcl::visualization::PCL_VISUALIZER_REPRESENTATION_SURFACE, "ground_plane");
+        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.3, "ground_plane"); 
+    }
+
+    // D. 渲染体高线 (蓝色)
+    m_viewer->addLine<PointT>(results.height_top, results.height_bottom, 0.0, 0.0, 1.0, "meas_height");
+    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_height");
+    
+    // E. 渲染体宽线 (黄色)
+    m_viewer->addLine<PointT>(results.width_p1, results.width_p2, 1.0, 1.0, 0.0, "meas_width");
+    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_width");
+
+    // F. 定义一个 Lambda 专门画轮廓多边形
+    auto drawContour = [this](PointCloudT::Ptr contour, std::string id, double r, double g, double b) {
+        if (!contour || contour->size() < 3) return;
+        for (size_t i = 0; i < contour->size() - 1; ++i) {
+            this->m_viewer->addLine(contour->points[i], contour->points[i + 1], r, g, b, id + "_" + std::to_string(i));
+            this->m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, id + "_" + std::to_string(i));
+        }
+        // 闭合线段
+        this->m_viewer->addLine(contour->points.back(), contour->points.front(), r, g, b, id + "_close");
+    };
+
+    drawContour(results.chest_contour, "chest", 1.0, 0.5, 0.0); // 橙色
+    drawContour(results.waist_contour, "waist", 0.0, 1.0, 1.0); // 青色
+    drawContour(results.hip_contour,   "hip",   1.0, 0.0, 1.0); // 品红
+
+    // 重置视角
+    m_viewer->resetCamera();
+    m_viewer->getRenderWindow()->Render();
+
+    // ==========================================================
+    // 5. 在控制台精美输出结果
+    // ==========================================================
+    log("==============================", "SUCCESS");
+    log("       体 尺 测 量 报 告       ", "SUCCESS");
+    log("==============================", "SUCCESS");
+    log(QString("▶ 体长 (Body Length) : %1 mm").arg(results.body_length, 0, 'f', 2), "INFO");
+    log(QString("▶ 体高 (Body Height) : %1 mm").arg(results.body_height, 0, 'f', 2), "INFO");
+    log(QString("▶ 体宽 (Body Width)  : %1 mm").arg(results.body_width, 0, 'f', 2), "INFO");
+    log(QString("▶ 胸围 (Chest Girth) : %1 mm").arg(results.chest_girth, 0, 'f', 2), "INFO");
+    log(QString("▶ 腰围 (Waist Girth) : %1 mm").arg(results.waist_girth, 0, 'f', 2), "INFO");
+    log(QString("▶ 臀围 (Hip Girth)   : %1 mm").arg(results.hip_girth, 0, 'f', 2), "INFO");
+    log("==============================", "SUCCESS");
 }
