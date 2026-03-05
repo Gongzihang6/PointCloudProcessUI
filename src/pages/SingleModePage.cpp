@@ -47,7 +47,7 @@ public:
     // 用于向 UI 打印日志的回调
     std::function<void(const QString&)> logger;
 
-    // [新增] 状态指针与回调函数
+    // 状态指针与回调函数
     bool* isManualMode = nullptr;
     std::function<void(double, double, double)> onPointPicked;
 
@@ -317,7 +317,7 @@ void SingleModePage::initCenterView() {
     });
 
     // =========================================================
-    // [新增] 注入 CloudCompare 风格鼠标交互
+    // 注入 CloudCompare 风格鼠标交互
     // =========================================================
     vtkRenderWindowInteractor* iren = m_viewer->getRenderWindow()->GetInteractor();
     // PCL 默认使用的是 vtkInteractorStyleTrackballCamera 的子类
@@ -329,7 +329,7 @@ void SingleModePage::initCenterView() {
         ccCallback->style = style;
         
 
-        // [新增] 绑定手动拾取的变量和 Lambda 回调
+        // 绑定手动拾取的变量和 Lambda 回调
         ccCallback->isManualMode = &m_isManualPickingMode;
         ccCallback->onPointPicked = [this](double x, double y, double z) {
             this->onManualPointPicked(x, y, z);
@@ -609,7 +609,7 @@ void SingleModePage::initRightPanel() {
     auto *lay3 = new QVBoxLayout();
     lay3->setSpacing(8);
     
-    // [新增] 1. 地面滤除阈值 (RANSAC)
+    // 1. 地面滤除阈值 (RANSAC)
     auto *rowRansac = new QHBoxLayout();
     rowRansac->addWidget(new QLabel("地面滤除厚度:"));
     m_spinRansacThresh = new QDoubleSpinBox();
@@ -722,7 +722,7 @@ void SingleModePage::initRightPanel() {
         aiWidget->setVisible(!checked); // 隐藏/显示 AI 面板
         
         if (checked) {
-            // [新增] 尝试准备点云
+            // 尝试准备点云
             if (!prepareKeypointsCloud()) {
                 // 准备失败，强行将手动拾取按钮恢复到未选中状态
                 btnManual->blockSignals(true);
@@ -761,10 +761,10 @@ void SingleModePage::initRightPanel() {
             // ==== 退出手动模式 (切换回 AI 模式) ====
             m_isManualPickingMode = false;
             
-            // [新增] 1. 清空内部存储的点数据
+            // 1. 清空内部存储的点数据
             m_keypoints.clear();
             
-            // [新增] 2. 清理 3D 视图上的旧球体和文字
+            // 2. 清理 3D 视图上的旧球体和文字
             for (int i = 0; i < 10; ++i) { 
                 m_viewer->removeShape("kp_sphere_" + std::to_string(i));
                 m_viewer->removeText3D("kp_text_" + std::to_string(i));
@@ -794,9 +794,9 @@ void SingleModePage::initRightPanel() {
     // 在 initRightPanel() 函数中，找到创建 QLabel 的循环
     for(int i=0; i<kps.size(); ++i) {
         QLabel *badge = new QLabel(kps[i]);
-        badge->setAlignment(Qt::AlignCenter); // [新增] 文字居中对齐，更好看
+        badge->setAlignment(Qt::AlignCenter); // 文字居中对齐，更好看
         
-        // [新增] 默认统一使用灰色“未激活”样式
+        // 默认统一使用灰色“未激活”样式
         badge->setStyleSheet(
             "background-color: #f4f4f5; "
             "color: #909399; "
@@ -840,32 +840,39 @@ void SingleModePage::initRightPanel() {
     btnCalc->setMinimumHeight(45);
     btnCalc->setStyleSheet("margin-top: 5px; font-weight: bold; font-size: 14px;");
     lay4->addWidget(btnCalc);
-    // [新增] 绑定槽函数
+    // 绑定槽函数
     connect(btnCalc, &QPushButton::clicked, this, &SingleModePage::onCalculateBodySize);
     box4->setContentLayout(lay4);
     scrollLayout->addWidget(box4);
 
 
     // =================================================
-    // 5. 导出 (Export) - [补全]
+    // 5. 导出 (Export)
     // =================================================
     auto *box5 = new CollapsibleBox("5. 导出 (Export)");
     auto *lay5 = new QVBoxLayout();
     lay5->setSpacing(8);
 
-    auto addExportBtn = [](QVBoxLayout* l, QString text) {
+    // [修改] 让 Lambda 返回 QPushButton* 指针
+    auto addExportBtn = [](QVBoxLayout* l, QString text) -> QPushButton* {
         QPushButton* b = new QPushButton(text);
         b->setStyleSheet("text-align: left; padding-left: 15px;");
         l->addWidget(b);
+        return b; // 返回指针
     };
 
-    addExportBtn(lay5, "💾 另存融合点云 (.pcd)");
-    addExportBtn(lay5, "💾 另存主体点云 (.pcd)");
-    addExportBtn(lay5, "📄 导出测量报告 (.csv)");
+    // 用三个变量接住创建好的按钮
+    QPushButton* btnExportMerged = addExportBtn(lay5, "💾 另存融合点云 (.pcd)");
+    QPushButton* btnExportBody   = addExportBtn(lay5, "💾 另存主体点云 (.pcd)");
+    QPushButton* btnExportCSV    = addExportBtn(lay5, "📄 导出测量报告 (.txt)");
+
+    // [新增] 绑定信号与槽函数
+    connect(btnExportMerged, &QPushButton::clicked, this, &SingleModePage::onExportMergedCloud);
+    connect(btnExportBody,   &QPushButton::clicked, this, &SingleModePage::onExportBodyCloud);
+    connect(btnExportCSV,    &QPushButton::clicked, this, &SingleModePage::onExportReport);
 
     box5->setContentLayout(lay5);
     scrollLayout->addWidget(box5);
-
     // =================================================
     
     scrollLayout->addStretch();
@@ -1797,7 +1804,7 @@ void SingleModePage::onManualPointPicked(double x, double y, double z) {
     }
 }
 
-// [新增] 检查并生成关键点检测专用的点云
+// 检查并生成关键点检测专用的点云
 bool SingleModePage::prepareKeypointsCloud() {
     // 1. 如果已经存在，说明之前生成过，直接返回成功
     if (m_cloudData.contains("Keypoints") && !m_cloudData["Keypoints"]->empty()) {
@@ -1938,6 +1945,10 @@ void SingleModePage::onCalculateBodySize() {
     m_viewer->resetCamera();
     m_viewer->getRenderWindow()->Render();
 
+    // 将本次计算结果缓存起来，供导出 CSV 使用
+    m_latestResults = results;
+    m_hasResults = true;
+
     // ==========================================================
     // 5. 在控制台精美输出结果
     // ==========================================================
@@ -1951,4 +1962,120 @@ void SingleModePage::onCalculateBodySize() {
     log(QString("▶ 腰围 (Waist Girth) : %1 mm").arg(results.waist_girth, 0, 'f', 2), "INFO");
     log(QString("▶ 臀围 (Hip Girth)   : %1 mm").arg(results.hip_girth, 0, 'f', 2), "INFO");
     log("==============================", "SUCCESS");
+}
+
+
+// ==========================================================
+// 导出模块：另存融合点云 (PCD)
+// ==========================================================
+void SingleModePage::onExportMergedCloud() {
+    // 检查是否存在融合点云
+    if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty()) {
+        QMessageBox::warning(this, "警告", "没有找到融合点云，请先执行配准与融合！");
+        return;
+    }
+
+    // 弹出文件保存对话框
+    QString defaultName = QString("Merged_Cloud_%1.pcd").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString fileName = QFileDialog::getSaveFileName(this, "另存融合点云", defaultName, "PCD Files (*.pcd)");
+    
+    if (fileName.isEmpty()) return; // 用户取消了保存
+
+    // 提示状态
+    log("正在保存融合点云至磁盘...", "INFO");
+
+    // 使用 PCL 保存点云为二进制格式（体积更小，加载更快）
+    if (pcl::io::savePCDFileBinary(fileName.toStdString(), *m_cloudData["Merged"]) == 0) {
+        log(QString("✅ 融合点云保存成功: %1").arg(fileName), "SUCCESS");
+    } else {
+        log("❌ 融合点云保存失败，请检查路径权限！", "ERROR");
+    }
+}
+
+// ==========================================================
+// 导出模块：另存主体点云 (PCD)
+// ==========================================================
+void SingleModePage::onExportBodyCloud() {
+    // 检查是否存在猪主体点云
+    if (!m_cloudData.contains("Body") || m_cloudData["Body"]->empty()) {
+        QMessageBox::warning(this, "警告", "没有找到提取的主体点云，请先执行主体提取！");
+        return;
+    }
+
+    QString defaultName = QString("Pig_Body_%1.pcd").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString fileName = QFileDialog::getSaveFileName(this, "另存主体点云", defaultName, "PCD Files (*.pcd)");
+    
+    if (fileName.isEmpty()) return;
+
+    log("正在保存主体点云至磁盘...", "INFO");
+
+    if (pcl::io::savePCDFileBinary(fileName.toStdString(), *m_cloudData["Body"]) == 0) {
+        log(QString("✅ 主体点云保存成功: %1").arg(fileName), "SUCCESS");
+    } else {
+        log("❌ 主体点云保存失败！", "ERROR");
+    }
+}
+
+// ==========================================================
+// 导出模块：导出测量报告 (TXT 精美排版)
+// ==========================================================
+void SingleModePage::onExportReport() {
+    // 检查是否已经计算过体尺
+    if (!m_hasResults) {
+        QMessageBox::warning(this, "警告", "尚未生成体尺数据！请先点击【计算体尺参数】。");
+        return;
+    }
+
+    // 1. 弹出保存对话框，后缀改为 .txt
+    QString defaultName = QString("Pig_BodySize_Report_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString fileName = QFileDialog::getSaveFileName(this, "导出测量报告", defaultName, "Text Files (*.txt)");
+    
+    if (fileName.isEmpty()) return;
+
+    // 2. 打开文件
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "错误", "无法创建或写入该 TXT 文件！文件可能被其他程序占用。");
+        return;
+    }
+
+    QTextStream out(&file);
+    
+    // 兼容性设置：确保以 UTF-8 编码写入 (Qt6 默认已是 UTF-8)
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    out.setCodec("UTF-8");
+#endif
+
+    // =======================================================
+    // 3. 开始精美排版写入
+    // =======================================================
+    out << "============================================================\n";
+    out << "                     猪 只 体 尺 测 量 报 告                   \n";
+    out << "============================================================\n";
+    out << QString(" 测量时间 : %1\n").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
+    out << "------------------------------------------------------------\n";
+    out << " 【测量参数】\t\t\t\t【测量值】\n";
+    out << "------------------------------------------------------------\n";
+
+    // 辅助 Lambda：使用固定宽度对齐文本 (-25表示左对齐占25字符，8表示右对齐占8字符)
+    auto writeLine = [&out](const QString& name, double value) {
+        out << " " << QString("%1").arg(name, -25) 
+            << " :\t" 
+            << QString("%1").arg(value, 8, 'f', 2) 
+            << " mm\n";
+    };
+
+    writeLine("体长 (Body Length)", m_latestResults.body_length);
+    writeLine("体高 (Body Height)", m_latestResults.body_height);
+    writeLine("体宽 (Body Width)",  m_latestResults.body_width);
+    writeLine("胸围 (Chest Girth)", m_latestResults.chest_girth);
+    writeLine("腰围 (Waist Girth)", m_latestResults.waist_girth);
+    writeLine("臀围 (Hip Girth)",   m_latestResults.hip_girth);
+
+    out << "============================================================\n";
+    out << " * 本报告由多相机 3D 点云处理系统自动生成。\n";
+
+    file.close();
+    
+    log(QString("✅ 测量报告已成功导出为 TXT: %1").arg(fileName), "SUCCESS");
 }

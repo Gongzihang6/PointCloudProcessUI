@@ -89,10 +89,10 @@ public:
     // 3. 半径/距离裁剪 (保留原点距离小于 radius 的点)
     static PointCloudT::Ptr distanceClip(PointCloudT::Ptr cloud_in, float radius_mm);
 
-    // [新增] 4. 应用 4x4 变换矩阵
+    // 4. 应用 4x4 变换矩阵
     static PointCloudT::Ptr transformCloud(PointCloudT::Ptr cloud_in, const Eigen::Matrix4d& matrix);
 
-    // [新增] 5. ICP 配准 (返回变换后的点云 + 最终的变换矩阵)
+    // 5. ICP 配准 (返回变换后的点云 + 最终的变换矩阵)
     // cloud_source: 待配准点云
     // cloud_target: 目标点云 (Top)
     // init_guess: 初始变换矩阵 (通常是手动输入那个)
@@ -109,7 +109,7 @@ public:
         std::function<void(const QString&, const QString&)> logger = nullptr
     );
 
-    // [新增] 6. 提取最大连通主体 (欧式聚类)
+    // 6. 提取最大连通主体 (欧式聚类)
     static PointCloudT::Ptr extractLargestCluster(
         PointCloudT::Ptr input_cloud, 
         double tolerance,       // 聚类容差 (mm)

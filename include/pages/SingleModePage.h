@@ -6,6 +6,11 @@
 #include <QNetworkReply>
 #include <QHttpMultiPart>
 #include <QList>
+#include <QFileDialog>
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
+#include <QMessageBox>
 #include "core/PointCloudAlgo.h"
 // PCL 相关头文件
 #include <pcl/point_cloud.h>
@@ -65,6 +70,11 @@ private slots:
 
     // 计算体尺参数的槽函数
     void onCalculateBodySize();
+
+    // 导出模块的三个槽函数
+    void onExportMergedCloud();
+    void onExportBodyCloud();
+    void onExportReport();
 private:
     // UI布局初始化函数，左侧面板、中心视图、右侧面板分别初始化
     void initLeftPanel();
@@ -152,19 +162,19 @@ private:
     // 存储关键点状态标签的指针，方便后续变绿
     QList<QLabel*> m_kpBadges;
 
-    // [新增] 运行 AI 按钮的指针
+    // 运行 AI 按钮的指针
     QPushButton *m_btnRunAI;
 
-    // [新增] 手动拾取状态控制
+    // 手动拾取状态控制
     bool m_isManualPickingMode = false;
     int m_currentPickIndex = 0;
     std::vector<Eigen::Vector3f> m_keypoints; // 存放当前的 6 个关键点 (AI预测的或手动拾取的)
 
-    // [新增] UI 状态辅助函数
+    // UI 状态辅助函数
     void updateBadgeStyle(int index, int state); // state: 0=灰(未开始), 1=蓝(正在拾取), 2=绿(已完成)
     void onManualPointPicked(double x, double y, double z); // 拾取到点后的处理逻辑
 
-    // [新增] 专门用于准备(或检查)关键点检测云的辅助函数
+    // 专门用于准备(或检查)关键点检测云的辅助函数
     bool prepareKeypointsCloud();
 
     // 体尺参数控件
@@ -172,4 +182,8 @@ private:
     QDoubleSpinBox *m_spinSkelStep;    // 骨架步长
     QDoubleSpinBox *m_spinSkelRadius;  // 骨架搜索半径
     QDoubleSpinBox *m_spinHeightAngle; // 地面法线角度阈值
+
+    // 缓存最新的体尺计算结果，供导出 CSV 时使用
+    BodySizeResults m_latestResults;
+    bool m_hasResults = false; // 标记是否已经成功计算过
 };
