@@ -37,6 +37,64 @@
 #include <QScrollBar>
 
 
+// ==========================================================
+// [新增] 定义并行配准任务的数据结构
+// ==========================================================
+struct RegTaskInput {
+    QString srcKey;
+    QString targetKey;
+    PointCloudT::Ptr cloudSrc;
+    PointCloudT::Ptr cloudTarget;
+    Eigen::Matrix4d initialGuess;
+    int methodIndex;
+    int algoType;
+    int icpIter;
+    double icpDist;
+    float ndtRes;
+    float ndtStep;
+    int ndtIter;
+};
+
+struct RegTaskOutput {
+    QString srcKey;
+    PointCloudT::Ptr cloudAlignedLocal;
+    Eigen::Matrix4d finalTransform;
+    std::vector<std::pair<QString, QString>> logs; // 收集该线程产生的所有日志
+    bool valid = false;
+};
+
+// ==========================================================
+// [新增] 纯后台工作函数 (剥离 UI，完全在后台子线程中并行执行)
+// ==========================================================
+RegTaskOutput processRegistrationWorker(const RegTaskInput& input) {
+    RegTaskOutput output;
+    output.srcKey = input.srcKey;
+    output.valid = true;
+    output.finalTransform = input.initialGuess; // 默认使用初始矩阵
+    
+    // 伪装一个 logger，将日志存入缓存而不是直接操作 UI
+    auto logBridge = [&output](const QString& msg, const QString& type) {
+        output.logs.push_back({msg, type});
+    };
+
+    if (input.methodIndex == 0) { // 手动矩阵
+        output.cloudAlignedLocal = PointCloudAlgo::transformCloud(input.cloudSrc, input.initialGuess);
+    } 
+    else if (input.methodIndex == 1 || input.methodIndex == 2) { // ICP
+        auto result = PointCloudAlgo::alignICP(input.cloudSrc, input.cloudTarget, input.initialGuess, input.icpIter, input.icpDist, input.algoType, logBridge);
+        output.cloudAlignedLocal = result.first;
+        output.finalTransform = result.second;
+    } 
+    else if (input.methodIndex == 3) { // NDT
+        Eigen::Matrix4f guess_f = input.initialGuess.cast<float>();
+        Eigen::Matrix4f final_f = PointCloudAlgo::refineRegistrationNDT(input.cloudSrc, input.cloudTarget, guess_f, input.ndtRes, input.ndtStep, input.ndtIter, logBridge);
+        output.finalTransform = final_f.cast<double>();
+        output.cloudAlignedLocal = PointCloudAlgo::transformCloud(input.cloudSrc, output.finalTransform);
+    }
+    
+    return output;
+}
+
 // 自定义 VTK 交互拦截器：模仿 CloudCompare
 class CloudCompareMouseCallback : public vtkCommand {
 public:
@@ -45,7 +103,7 @@ public:
     // 保存默认交互样式的指针
     vtkInteractorStyleTrackballCamera* style = nullptr;
     // 用于向 UI 打印日志的回调
-    std::function<void(const QString&)> logger;
+    std::function<void(const QString&, const QString&)> logger;
 
     // 状态指针与回调函数
     bool* isManualMode = nullptr;
@@ -98,31 +156,29 @@ public:
                 style->FindPokedRenderer(x, y);
                 vtkRenderer* ren = style->GetCurrentRenderer();
                 if (ren) {
-                    // 使用 vtkPointPicker 向 3D 空间发射射线，拾取最近的点
-                    vtkSmartPointer<vtkPointPicker> picker = vtkSmartPointer<vtkPointPicker>::New();
-                    picker->SetTolerance(0.005); // 拾取容差 (防止点太稀疏点不到)
+                    // [核心修复] 使用 vtkCellPicker，专治点云拾取难题
+                    vtkSmartPointer<vtkCellPicker> picker = vtkSmartPointer<vtkCellPicker>::New();
+                    picker->SetTolerance(0.01); // 设置屏幕容差(0.01=1%)，相当于鼠标周围的一个小圆圈，点中更容易
                     picker->Pick(x, y, 0.0, ren);
 
-                    if (picker->GetPointId() != -1) {
-                        // 如果拾取成功，获取该点的 3D 坐标
+                    if (picker->GetCellId() != -1) {
+                        // 成功拾取到点云上的点
                         double* pickPos = picker->GetPickPosition();
                         
-                        // [核心原理] 将相机的焦点 (Focal Point) 移动到被拾取的点
-                        // 这样鼠标左键拖拽旋转时，就会以此点为球心旋转
                         ren->GetActiveCamera()->SetFocalPoint(pickPos[0], pickPos[1], pickPos[2]);
                         iren->Render(); // 触发重绘
                         
-                        // 发送日志到界面
                         if (logger) {
-                            QString msg = QString("📍 已设置旋转中心: (%.1f, %.1f, %.1f)")
+                            QString msg = QString("📍 已设置旋转中心: (X:%.1f, Y:%.1f, Z:%.1f)")
                                           .arg(pickPos[0]).arg(pickPos[1]).arg(pickPos[2]);
-                            logger(msg);
+                            logger(msg, "INFO");
                         }
                     }
                 }
-                this->AbortFlagOn();
+                this->AbortFlagOn(); // 拦截 VTK 的默认双击事件
                 break;
             }
+
             default:
                 break; // 其他事件不处理，交给 VTK 默认逻辑
         }
@@ -232,7 +288,8 @@ void SingleModePage::initLeftPanel() {
         // 下面这俩暂时还没数据，先占位
         {"Merged", "✨ 融合后点云", "white"},
         {"Body",   "🐷 提取主体", "pink"},
-        {"Keypoints", "🎯 关键点检测云", "orange"}
+        {"Keypoints", "🎯 关键点检测云", "orange"},
+        {"Measurements", "📏 体尺测量结果", "#9c27b0"}
     };
 
     for(const auto& layer : layers) {
@@ -541,11 +598,78 @@ void SingleModePage::initRightPanel() {
     auto *rowAlgo = new QHBoxLayout();
     rowAlgo->addWidget(new QLabel("算法:"));
     m_comboRegMethod = new QComboBox();
-    m_comboRegMethod->addItems({"手动矩阵 (Manual)", "ICP (P2Point)", "ICP (P2Plane)"});
+    m_comboRegMethod->addItems({"手动矩阵 (Manual)", "ICP (P2Point)", "ICP (P2Plane)", "NDT 配准微调"});
     rowAlgo->addWidget(m_comboRegMethod);
     lay2->addLayout(rowAlgo);
 
-    // 2.2 [关键新增] 参与配准的源点云选择
+
+    // ==========================================
+    // [新增] 动态参数面板：ICP 参数
+    // ==========================================
+    m_icpParamsWidget = new QWidget();
+    auto *icpLay = new QGridLayout(m_icpParamsWidget);
+    icpLay->setContentsMargins(15, 0, 0, 0); // 左侧缩进一点表示层级
+    
+    icpLay->addWidget(new QLabel("最大迭代次数:"), 0, 0);
+    m_spinIcpIter = new QSpinBox(); 
+    m_spinIcpIter->setRange(1, 500); 
+    m_spinIcpIter->setValue(60);
+    m_spinIcpIter->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    icpLay->addWidget(m_spinIcpIter, 0, 1);
+
+    icpLay->addWidget(new QLabel("最大对应距离(mm):"), 1, 0);
+    m_spinIcpDist = new QDoubleSpinBox(); 
+    m_spinIcpDist->setRange(1.0, 500.0); 
+    m_spinIcpDist->setValue(100.0);
+    m_spinIcpDist->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    icpLay->addWidget(m_spinIcpDist, 1, 1);
+    
+    lay2->addWidget(m_icpParamsWidget);
+
+    // ==========================================
+    // [新增] 动态参数面板：NDT 参数
+    // ==========================================
+    m_ndtParamsWidget = new QWidget();
+    auto *ndtLay = new QGridLayout(m_ndtParamsWidget);
+    ndtLay->setContentsMargins(15, 0, 0, 0);
+    
+    ndtLay->addWidget(new QLabel("网格分辨率(mm):"), 0, 0);
+    m_spinNdtRes = new QDoubleSpinBox(); 
+    m_spinNdtRes->setRange(10.0, 500.0); 
+    m_spinNdtRes->setValue(100.0);
+    m_spinNdtRes->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    ndtLay->addWidget(m_spinNdtRes, 0, 1);
+
+    ndtLay->addWidget(new QLabel("搜索步长:"), 1, 0);
+    m_spinNdtStep = new QDoubleSpinBox(); 
+    m_spinNdtStep->setRange(0.01, 5.0); 
+    m_spinNdtStep->setValue(0.1); 
+    m_spinNdtStep->setSingleStep(0.1);
+    m_spinNdtStep->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    ndtLay->addWidget(m_spinNdtStep, 1, 1);
+
+    ndtLay->addWidget(new QLabel("最大迭代次数:"), 2, 0);
+    m_spinNdtIter = new QSpinBox(); 
+    m_spinNdtIter->setRange(10, 200); 
+    m_spinNdtIter->setValue(35);
+    m_spinNdtIter->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    ndtLay->addWidget(m_spinNdtIter, 2, 1);
+
+    lay2->addWidget(m_ndtParamsWidget);
+
+    // ==========================================
+    // [新增] 面板显示/隐藏逻辑联动
+    // ==========================================
+    m_icpParamsWidget->setVisible(false); // 默认隐藏
+    m_ndtParamsWidget->setVisible(false); // 默认隐藏
+
+    connect(m_comboRegMethod, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
+        m_icpParamsWidget->setVisible(index == 1 || index == 2); // 选中ICP时显示
+        m_ndtParamsWidget->setVisible(index == 3);               // 选中NDT时显示
+    });
+
+
+    // 2.2 参与配准的源点云选择
     QLabel* lblSrc = new QLabel("选择待配准源 (Target=Top):");
     lblSrc->setStyleSheet("font-weight: bold; color: #409eff;");    // 蓝色加粗字体
     lay2->addWidget(lblSrc);
@@ -574,7 +698,20 @@ void SingleModePage::initRightPanel() {
     m_comboMatrixView = new QComboBox();
     m_comboMatrixView->addItems(sources);   // LB, LT, RB, RT
     rowMatTarget->addWidget(m_comboMatrixView);
+
+    // [新增] 重置默认矩阵按钮
+    QPushButton *btnResetMat = new QPushButton("⟲ 重置");
+    btnResetMat->setToolTip("放弃配准结果，恢复为最初始的物理标定矩阵");
+    rowMatTarget->addWidget(btnResetMat);
+    
     matrixLay->addLayout(rowMatTarget);
+
+    // [新增] 绑定重置按钮逻辑
+    connect(btnResetMat, &QPushButton::clicked, this, [this]() {
+        initDefaultMatrices(); // 重新加载硬编码的物理标定值覆盖内存
+        onMatrixTargetChanged(0); // 刷新界面文本框
+        log("已放弃优化，恢复所有视角的矩阵为物理标定默认值。", "INFO");
+    });
 
     m_textMatrix = new QTextEdit();
     m_textMatrix->setObjectName("MatrixEditor");
@@ -593,11 +730,11 @@ void SingleModePage::initRightPanel() {
     connect(m_textMatrix, &QTextEdit::textChanged, this, &SingleModePage::onMatrixTextChanged);
 
     // 2.4 执行按钮
-    QPushButton *btnReg = new QPushButton("🚀 执行配准与融合");
-    btnReg->setObjectName("PrimaryBtn");
-    lay2->addWidget(btnReg);
-    
-    connect(btnReg, &QPushButton::clicked, this, &SingleModePage::onExecuteRegistration);
+    m_btnRunReg = new QPushButton("🚀 执行配准与融合");
+    m_btnRunReg->setObjectName("PrimaryBtn");
+    lay2->addWidget(m_btnRunReg);
+
+    connect(m_btnRunReg, &QPushButton::clicked, this, &SingleModePage::onExecuteRegistration);
 
     box2->setContentLayout(lay2);       // 设置 box2 的内容布局
     scrollLayout->addWidget(box2);      // 将 box2 加入右侧滚动区域
@@ -1045,6 +1182,24 @@ void SingleModePage::loadCloudToMemory(const QString& key, const QString& filePa
 
 void SingleModePage::onLayerToggle(const QString& layerId, bool checked) {
     if (!m_viewer) return;
+
+    // [新增] 特殊图层独立处理逻辑
+    if (layerId == "Measurements") {
+        if (checked) {
+            if (m_hasResults) drawMeasurements();
+            else {
+                log("暂无体尺测量数据，请先执行计算。", "WARN");
+                m_layerChecks["Measurements"]->blockSignals(true);
+                m_layerChecks["Measurements"]->setChecked(false);
+                m_layerChecks["Measurements"]->blockSignals(false);
+            }
+        } else {
+            clearMeasurements();
+        }
+        m_viewer->getRenderWindow()->Render();
+        return; // 直接返回，不走下面的普通点云逻辑
+    }
+
     std::string cloudId = layerId.toStdString();
 
     // 无论显示还是隐藏，先移除旧的，防止 ID 重复导致渲染异常
@@ -1298,199 +1453,150 @@ void SingleModePage::onMatrixTextChanged() {
 }
 
 void SingleModePage::onExecuteRegistration() {
-    // =========================================================
-    // 执行前，先同步界面上正在编辑的矩阵到内存
-    // 在执行耗时或关键的底层算法前，永远不要相信用户的输入。必须先强制把 UI 上的数据刷回内存，并进行合法性校验
-    // =========================================================
-    QString currentEditingKey = m_comboMatrixView->currentText();   // 获取选定的参考目标 (Target)
+    // 1. 同步编辑器矩阵并校验
+    QString currentEditingKey = m_comboMatrixView->currentText();
     QString matrixText = m_textMatrix->toPlainText();
-    
-    // 简单的格式校验，Qt::SkipEmptyParts: 如果用户多敲了几个空格，切分出来的空字符串会被自动丢弃，防止解析错误
     QStringList tokens = matrixText.split(QRegularExpression("[\\s,]+"), Qt::SkipEmptyParts);
     if (tokens.size() == 16) {
         m_transforms[currentEditingKey] = stringToMatrix(matrixText);
     } else {
         QMessageBox::warning(this, "矩阵格式错误", "当前编辑框中的矩阵数字不是16个，请检查！");
-        return; // 阻止执行，保护数据
+        return;
     }
 
-    log("启动配准与融合流程...", "ALGO");
-
-    // 1. 获取选定的参考目标 (Target)
-    // m_comboRegTarget 是 UI 下拉框，获取用户选的是 "Top" 还是 "LT" 等
     QString targetKey = m_comboRegTarget->currentText();
-
-    // 检查目标点云是否存在
     if (!m_cloudData.contains(targetKey)) {
-        QMessageBox::warning(this, "错误", "未找到参考目标点云: " + targetKey + "\n请先加载该文件。");
+        QMessageBox::warning(this, "错误", "未找到参考目标点云: " + targetKey);
         return;
     }
     PointCloudT::Ptr cloudTarget = m_cloudData[targetKey];
-
-    // 获取目标相对于 Top 的矩阵 (T_target_to_top)
-    // 如果目标就是 Top，矩阵就是单位阵；否则从 map 里取
     Eigen::Matrix4d matTargetToTop = Eigen::Matrix4d::Identity();
-    if (targetKey != "Top") {
-        if (!m_transforms.contains(targetKey)) {
-             QMessageBox::warning(this, "错误", "参考目标 " + targetKey + " 尚未初始化矩阵。");
-             return;
-        }
-        matTargetToTop = m_transforms[targetKey];
-    }
+    if (targetKey != "Top") matTargetToTop = m_transforms[targetKey];
 
-    // 获取算法类型
-    // m_comboRegMethod 的 item 顺序是: 
-    // index 0: "手动矩阵 (Manual)"
-    // index 1: "ICP (P2Point)"
-    // index 2: "ICP (P2Plane)"
+    // ==========================================================
+    // 2. 准备并行任务列表
+    // ==========================================================
+    QList<RegTaskInput> tasks;
     int methodIndex = m_comboRegMethod->currentIndex();
-    bool useICP = (methodIndex > 0); // 只要不是 0 都是 ICP
-    
-    // 转换 ComboBox 索引到算法枚举
-    // 界面 index 1 -> P2Point (枚举 0)
-    // 界面 index 2 -> P2Plane (枚举 1)
-    int algoType = (methodIndex == 2) ? PointCloudAlgo::P2Plane : PointCloudAlgo::P2Point;
-    
-    // 变量定义只保留这一次
-    int processedCount = 0; 
-    
-    // =========================================================
-    // 2. 初始化输出容器
-    // =========================================================
-    
-    // 容器 A: 用于算法后续处理的纯几何点云 (不带颜色)
-    PointCloudT::Ptr geometryMerged(new PointCloudT);
-    
-    // 容器 B: 用于 3D 窗口显示的彩色点云 (m_mergedCloudRGB 是成员变量)
-    // 功能：确保 m_mergedCloudRGB 智能指针被正确初始化，并清空内部数据以备复用。
-    // 实现：通过判断指针是否为空来进行延迟初始化，使用 reset 接管新分配的堆内存，最后调用 clear 清空点云容器。
-    if (!m_mergedCloudRGB) {
-        // 如果这是程序第一次运行到这里，指针是个空指针 (nullptr)
-        // new pcl::PointCloud... 会在堆内存(Heap)中开辟一块新的点云对象
-        // reset() 会让 m_mergedCloudRGB 这个智能指针“接管”这块新内存的所有权
-        m_mergedCloudRGB.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
-    }
-    m_mergedCloudRGB->clear(); // 清空旧数据，准备重新拼接
 
-    // =========================================================
-    // 3. 定义 Lambda: 同时向两个容器添加点
-    // =========================================================
-    auto appendColoredCloud = [&](PointCloudT::Ptr inputCloud, const QString& camName) {
-        if (!inputCloud) return;
-        
-        int r, g, b;
-        getCameraColor(camName, r, g, b); // 获取该相机的专属颜色
-
-        // 遍历输入点云的所有点
-        for (const auto& pt : inputCloud->points) {
-            // 1. 添加到几何云 (用于保存/提取主体)
-            geometryMerged->points.push_back(pt);
-
-            // 2. 添加到彩色云 (用于显示，带 RGB)
-            pcl::PointXYZRGB ptRGB;
-            ptRGB.x = pt.x; ptRGB.y = pt.y; ptRGB.z = pt.z;
-            ptRGB.r = r;    ptRGB.g = g;    ptRGB.b = b;
-            m_mergedCloudRGB->points.push_back(ptRGB);
-        }
-    };
-
-    // --- 第一步：先加入 Target (基准) ---
-    // Target 作为坐标原点，不需要变换，直接加进去
-    appendColoredCloud(cloudTarget, targetKey);     // cloudTarget是目标点云数据，targetKey 是目标点云相机名称
-    
-    // --- 第二步：遍历 Sources (待配准源)（向目标点云对齐） ---
     for (auto it = m_sourceChecks.begin(); it != m_sourceChecks.end(); ++it) {
         QString srcKey = it.key(); 
-        QCheckBox* chk = it.value();
+        if (!it.value()->isChecked() || !m_cloudData.contains(srcKey) || srcKey == targetKey) continue; 
 
-        // 跳过没勾选的、没数据的、或者源就是目标自己的
-        if (!chk->isChecked() || !m_cloudData.contains(srcKey) || srcKey == targetKey) {
-            continue; 
-        }
-
-        // 根据相机名称srcKey从m_cloudData中获取源点云数据
-        PointCloudT::Ptr cloudSrc = m_cloudData[srcKey];
+        RegTaskInput task;
+        task.srcKey = srcKey;
+        task.targetKey = targetKey;
+        task.cloudSrc = m_cloudData[srcKey];
+        task.cloudTarget = cloudTarget;
+        task.initialGuess = matTargetToTop.inverse() * m_transforms[srcKey];
+        task.methodIndex = methodIndex;
+        task.algoType = (methodIndex == 2) ? PointCloudAlgo::P2Plane : PointCloudAlgo::P2Point;
         
-        // ---------------------------------------------------------
-        // 数学计算：计算 T_src_to_target
-        // ---------------------------------------------------------
-        Eigen::Matrix4d matSrcToTop_Current = m_transforms[srcKey];
-        Eigen::Matrix4d matSrcToTarget_Guess = matTargetToTop.inverse()* matSrcToTop_Current; // 从 src 到 target 的初始猜测矩阵
+        // UI 参数抓取
+        task.icpIter = m_spinIcpIter->value();
+        task.icpDist = m_spinIcpDist->value();
+        task.ndtRes = m_spinNdtRes->value();
+        task.ndtStep = m_spinNdtStep->value();
+        task.ndtIter = m_spinNdtIter->value();
 
+        tasks.append(task);
+    }
 
-        Eigen::Matrix4d matSrcToTarget_Final = matSrcToTarget_Guess;
-        PointCloudT::Ptr cloudAlignedLocal; // 变换到 Target 坐标系的点云
+    if (tasks.isEmpty() && targetKey != "Top") {
+        log("警告：没有需要配准的源点云。", "WARN");
+        return;
+    }
 
-        if (useICP) {
-            // [核心修改]：定义一个 Lambda 胶水函数
-            // [this] 捕获列表：让 Lambda 内部能访问当前类的成员函数 log
-            auto logBridge = [this](const QString& msg, const QString& type) {
-                // 在这里调用你那个漂亮的 log 函数
-                this->log(msg, type); 
-            };
-            // 对 Target 进行 ICP
-            auto result = PointCloudAlgo::alignICP(cloudSrc, cloudTarget, matSrcToTarget_Guess, 30, 0.05, algoType, logBridge);
-            cloudAlignedLocal = result.first;
-            matSrcToTarget_Final = result.second;
-            log(QString("ICP [%1 -> %2] 收敛").arg(srcKey).arg(targetKey), "ALGO");
-        } else {
-            // 手动模式，直接应用矩阵
-            cloudAlignedLocal = PointCloudAlgo::transformCloud(cloudSrc, matSrcToTarget_Guess);
-        }
+    // ==========================================================
+    // 3. 挂起 UI 状态，启动并发线程池 (非阻塞)
+    // ==========================================================
+    log("🚀 启动多线程并行配准流水线，操作已挂起后台运行...", "ALGO");
+    m_btnRunReg->setEnabled(false);
+    m_btnRunReg->setText("⏳ 正在后台并行配准中...");
 
-        // ---------------------------------------------------------
-        // 结果回写：更新全局矩阵 T_src_to_top
-        // T_src_to_top = T_target_to_top * T_src_to_target
-        // ---------------------------------------------------------
-        Eigen::Matrix4d matSrcToTop_New = matTargetToTop * matSrcToTarget_Final;
-        m_transforms[srcKey] = matSrcToTop_New; // 更新内存中的位置记录
+    QFutureWatcher<RegTaskOutput> *watcher = new QFutureWatcher<RegTaskOutput>(this);
+
+    // ==========================================================
+    // 4. 当所有后台线程完成时，触发回调更新 UI
+    // ==========================================================
+    connect(watcher, &QFutureWatcher<RegTaskOutput>::finished, this, [this, watcher, targetKey, cloudTarget, matTargetToTop]() {
         
-        // [关键] 将变换后的点云，涂上 srcKey 的颜色，加入融合云
-        if (cloudAlignedLocal) {
-            appendColoredCloud(cloudAlignedLocal, srcKey);
-            processedCount++;
+        // 拿回所有线程的计算结果
+        QList<RegTaskOutput> results = watcher->future().results();
+        
+        // 初始化存储容器
+        PointCloudT::Ptr geometryMerged(new PointCloudT);
+        if (!m_mergedCloudRGB) { m_mergedCloudRGB.reset(new pcl::PointCloud<pcl::PointXYZRGB>); }
+        m_mergedCloudRGB->clear();
+
+        // 统一合并颜色的 Lambda
+        auto appendColoredCloud = [&](PointCloudT::Ptr inputCloud, const QString& camName) {
+            if (!inputCloud) return;
+            int r, g, b; getCameraColor(camName, r, g, b);
+            for (const auto& pt : inputCloud->points) {
+                geometryMerged->points.push_back(pt);
+                
+                // [修复] 先使用默认构造函数，再分别赋值
+                pcl::PointXYZRGB ptRGB;
+                ptRGB.x = pt.x; ptRGB.y = pt.y; ptRGB.z = pt.z;
+                ptRGB.r = static_cast<uint8_t>(r);
+                ptRGB.g = static_cast<uint8_t>(g);
+                ptRGB.b = static_cast<uint8_t>(b);
+                
+                m_mergedCloudRGB->points.push_back(ptRGB);
+            }
+        };
+
+
+        // 1. 先加入固定的目标点云
+        appendColoredCloud(cloudTarget, targetKey);
+
+        // 2. 将各个子线程算好的点云累加进来
+        for(const auto& res : results) {
+            if(!res.valid) continue;
+            
+            // 打印该线程在后台产生的所有日志
+            for(const auto& l : res.logs) { log(l.first, l.second); }
+            
+            log(QString("完成 [%1 -> %2] 的配准与拼装。").arg(res.srcKey).arg(targetKey), "ALGO");
+
+            // 更新内存矩阵
+            m_transforms[res.srcKey] = matTargetToTop * res.finalTransform;
+            
+            // 拼装点云
+            if (res.cloudAlignedLocal) appendColoredCloud(res.cloudAlignedLocal, res.srcKey);
         }
-    }
 
-    // 检查是否只添加了 Target 自己，没有配准其他任何东西
-    if (processedCount == 0 && targetKey == "Top") {
-        log("警告：只显示了 Target，未配准任何源点云 (请勾选右侧源)", "WARN");
-        // 注意：这里不 return，依然显示 Target 也是可以的
-    }
+        // 3. 收尾工作
+        geometryMerged->width = geometryMerged->size(); geometryMerged->height = 1; geometryMerged->is_dense = true;
+        m_cloudData["Merged"] = geometryMerged; 
+        m_mergedCloudRGB->width = m_mergedCloudRGB->size(); m_mergedCloudRGB->height = 1; m_mergedCloudRGB->is_dense = true;
 
-    // =========================================================
-    // 4. 结果存储与显示
-    // =========================================================
-    
-    // 设置几何点云属性 (使其 Dense，防止后续算法报错)
-    geometryMerged->width = geometryMerged->size();
-    geometryMerged->height = 1;
-    geometryMerged->is_dense = true;
-    
-    // 将无色的几何数据存入 m_cloudData["Merged"]，用于后续保存文件或提取主体
-    m_cloudData["Merged"] = geometryMerged; 
+        if (m_layerChecks.contains("Merged")) {
+            m_layerChecks["Merged"]->setChecked(true);
+            onLayerToggle("Merged", true); 
+        }
+        
+        if (m_transforms.contains(m_comboMatrixView->currentText())) {
+            onMatrixTargetChanged(0); 
+        }
 
-    // 设置彩色点云属性
-    m_mergedCloudRGB->width = m_mergedCloudRGB->size();
-    m_mergedCloudRGB->height = 1;
-    m_mergedCloudRGB->is_dense = true;
+        log(QString("✅ 所有线程处理完毕。融合点云总点数: %1").arg(m_mergedCloudRGB->size()), "SUCCESS");
 
-    // 5. 强制勾选 "Merged" 图层并触发显示
-    if (m_layerChecks.contains("Merged")) {
-        // 先设为 true
-        m_layerChecks["Merged"]->setChecked(true);
-        // 手动调用一次 onLayerToggle 确保视图刷新 (传入 true)
-        // 这个函数里会判断如果 layerId 是 "Merged"，就优先用 m_mergedCloudRGB 显示
-        onLayerToggle("Merged", true); 
-    }
+        // 恢复 UI 按钮状态
+        m_btnRunReg->setEnabled(true);
+        m_btnRunReg->setText("🚀 执行配准与融合");
+        
+        // 清理内存
+        watcher->deleteLater();
+    });
 
-    log(QString("融合完成。总点数: %1 (已保留各视角颜色)").arg(m_mergedCloudRGB->size()), "SUCCESS");
-    
-    // 如果当前矩阵编辑器正在显示某个被更新的相机，刷新一下文本框
-    if (m_transforms.contains(m_comboMatrixView->currentText())) {
-        onMatrixTargetChanged(0); 
-    }
+    // 🔥 发射任务给 Qt 的全局并发线程池！
+    // QtConcurrent::mapped 会根据 CPU 核心数自动切分任务
+    QFuture<RegTaskOutput> future = QtConcurrent::mapped(tasks, processRegistrationWorker);
+    watcher->setFuture(future);
 }
+
 
 void SingleModePage::log(const QString& msg, const QString& type) {
     if (!m_console) return;
@@ -1842,30 +1948,106 @@ bool SingleModePage::prepareKeypointsCloud() {
 }
 
 
+// ---------------------------------------------------------
+// [新增] 清理测量结果图层
+// ---------------------------------------------------------
+void SingleModePage::clearMeasurements() {
+    if (!m_viewer) return;
+    m_viewer->removePointCloud("measure_body_cloud");
+    m_viewer->removePointCloud("skel_pts");
+    m_viewer->removeShape("ground_plane");
+    m_viewer->removeShape("meas_height");
+    m_viewer->removeShape("meas_width");
+    
+    // 粗略遍历移除所有动态生成的线段 (PCL的 removeShape 效率很高，不怕多循环)
+    for (int i = 0; i < 300; ++i) {
+        m_viewer->removeShape("skel_line_" + std::to_string(i));
+        m_viewer->removeShape("chest_" + std::to_string(i));
+        m_viewer->removeShape("waist_" + std::to_string(i));
+        m_viewer->removeShape("hip_" + std::to_string(i));
+    }
+    m_viewer->removeShape("chest_close");
+    m_viewer->removeShape("waist_close");
+    m_viewer->removeShape("hip_close");
+}
+
+// ---------------------------------------------------------
+// [新增] 绘制测量结果图层
+// ---------------------------------------------------------
+void SingleModePage::drawMeasurements() {
+    if (!m_viewer || !m_hasResults) return;
+    
+    clearMeasurements(); // 绘制前先清理旧的
+
+    BodySizeResults& res = m_latestResults;
+
+    // A. 半透明主体
+    pcl::visualization::PointCloudColorHandlerCustom<PointT> body_color(res.aligned_cloud, 200, 200, 200);
+    m_viewer->addPointCloud<PointT>(res.aligned_cloud, body_color, "measure_body_cloud");
+    m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.4, "measure_body_cloud"); 
+
+    // B. 对齐后的关键点
+    std::vector<Eigen::Vector3f> eigen_kps;
+    for (const auto& pt : res.aligned_keypoints) eigen_kps.push_back(Eigen::Vector3f(pt.x, pt.y, pt.z));
+    drawKeypointsInViewer(eigen_kps);
+
+    // C. 绿色骨架
+    if (res.skeleton_cloud && res.skeleton_cloud->size() > 1) {
+        pcl::visualization::PointCloudColorHandlerCustom<PointT> skel_color(res.skeleton_cloud, 0, 255, 0);
+        m_viewer->addPointCloud<PointT>(res.skeleton_cloud, skel_color, "skel_pts");
+        m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, "skel_pts");
+        for (size_t i = 0; i < res.skeleton_cloud->size() - 1; ++i) {
+            m_viewer->addLine<PointT>(res.skeleton_cloud->points[i], res.skeleton_cloud->points[i+1], 0, 1.0, 0, "skel_line_" + std::to_string(i));
+            m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, "skel_line_" + std::to_string(i));
+        }
+    }
+
+    // D. 地面与高宽线
+    if (res.ground_polygon && res.ground_polygon->size() == 4) {
+        m_viewer->addPolygon<PointT>(res.ground_polygon, 0.0, 1.0, 0.0, "ground_plane");
+        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_REPRESENTATION, pcl::visualization::PCL_VISUALIZER_REPRESENTATION_SURFACE, "ground_plane");
+        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.3, "ground_plane"); 
+    }
+    m_viewer->addLine<PointT>(res.height_top, res.height_bottom, 0.0, 0.0, 1.0, "meas_height");
+    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_height");
+    m_viewer->addLine<PointT>(res.width_p1, res.width_p2, 1.0, 1.0, 0.0, "meas_width");
+    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_width");
+
+    // E. 轮廓多边形
+    auto drawContour = [this](PointCloudT::Ptr contour, std::string id, double r, double g, double b) {
+        if (!contour || contour->size() < 3) return;
+        for (size_t i = 0; i < contour->size() - 1; ++i) {
+            this->m_viewer->addLine(contour->points[i], contour->points[i + 1], r, g, b, id + "_" + std::to_string(i));
+            this->m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, id + "_" + std::to_string(i));
+        }
+        this->m_viewer->addLine(contour->points.back(), contour->points.front(), r, g, b, id + "_close");
+        this->m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, id + "_close");
+    };
+    drawContour(res.chest_contour, "chest", 1.0, 0.5, 0.0);
+    drawContour(res.waist_contour, "waist", 0.0, 1.0, 1.0);
+    drawContour(res.hip_contour,   "hip",   1.0, 0.0, 1.0);
+}
+
+// ---------------------------------------------------------
+// [重构] 计算主函数，剥离强耦合绘图代码
+// ---------------------------------------------------------
 void SingleModePage::onCalculateBodySize() {
-    // 1. 检查数据前置条件
     if (m_keypoints.size() != 6) {
-        QMessageBox::warning(this, "警告", "关键点未准备就绪！请确保 6 个关键点已全部检测或手动拾取。");
+        QMessageBox::warning(this, "警告", "关键点未准备就绪！请确保 6 个关键点已全部检测。");
         return;
     }
-    
-    // 必须同时拥有 Merged 和 Body 两个图层的数据
-    if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty() ||
-        !m_cloudData.contains("Body") || m_cloudData["Body"]->empty()) {
-        QMessageBox::warning(this, "警告", "缺少主体或融合点云数据！请先执行配准融合并提取主体。");
+    if (!m_cloudData.contains("Merged") || !m_cloudData.contains("Body")) {
+        QMessageBox::warning(this, "警告", "缺少主体或融合点云数据！");
         return;
     }
 
     log("开始执行体尺自动计算流水线...", "ALGO");
 
-    // 2. 收集参数
     float girth_thick = m_spinGirthThick->value();
     float skel_step = m_spinSkelStep->value();
     float skel_radius = m_spinSkelRadius->value();
     float height_angle = m_spinHeightAngle->value();
 
-    // 3. 调用底层的整合算法 (这里需要你在 PointCloudAlgo 中实现一个聚合函数)
-    // 深拷贝两份数据，分别传入算法
     PointCloudT::Ptr cloud_body(new PointCloudT(*m_cloudData["Body"]));
     PointCloudT::Ptr cloud_merged(new PointCloudT(*m_cloudData["Merged"]));
     
@@ -1880,81 +2062,32 @@ void SingleModePage::onCalculateBodySize() {
         return;
     }
 
-    // ==========================================================
-    // 4. 清理旧视图并渲染新视图 (Qt/PCL 渲染逻辑)
-    // ==========================================================
-    m_viewer->removeAllPointClouds();
-    m_viewer->removeAllShapes();
-
-    // A. 渲染 PCA 对齐后的主体点云
-    pcl::visualization::PointCloudColorHandlerCustom<PointT> body_color(results.aligned_cloud, 200, 200, 200);
-    m_viewer->addPointCloud<PointT>(results.aligned_cloud, body_color, "measure_body_cloud");
-    m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.4, "measure_body_cloud"); // 半透明，凸显线框
-
-    // B. 渲染 6 个对齐后的关键点
-    // 渲染对齐后的关键点 (红球)
-    // 将 PCL 的 PointT 转换为 Eigen::Vector3f 以适配 drawKeypointsInViewer 函数
-    std::vector<Eigen::Vector3f> eigen_kps;
-    for (const auto& pt : results.aligned_keypoints) {
-        eigen_kps.push_back(Eigen::Vector3f(pt.x, pt.y, pt.z));
-    }
-    drawKeypointsInViewer(eigen_kps);
-
-    // C. 渲染骨架 (绿色)
-    if (results.skeleton_cloud && results.skeleton_cloud->size() > 1) {
-        pcl::visualization::PointCloudColorHandlerCustom<PointT> skel_color(results.skeleton_cloud, 0, 255, 0);
-        m_viewer->addPointCloud<PointT>(results.skeleton_cloud, skel_color, "skel_pts");
-        m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 4, "skel_pts");
-        for (size_t i = 0; i < results.skeleton_cloud->size() - 1; ++i) {
-            m_viewer->addLine<PointT>(results.skeleton_cloud->points[i], results.skeleton_cloud->points[i+1], 0, 1.0, 0, "skel_line_" + std::to_string(i));
-            m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, "skel_line_" + std::to_string(i));
-        }
-    }
-
-    // 渲染地面多边形 (半透明绿色)
-    if (results.ground_polygon && results.ground_polygon->size() == 4) {
-        m_viewer->addPolygon<PointT>(results.ground_polygon, 0.0, 1.0, 0.0, "ground_plane");
-        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_REPRESENTATION, pcl::visualization::PCL_VISUALIZER_REPRESENTATION_SURFACE, "ground_plane");
-        m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY, 0.3, "ground_plane"); 
-    }
-
-    // D. 渲染体高线 (蓝色)
-    m_viewer->addLine<PointT>(results.height_top, results.height_bottom, 0.0, 0.0, 1.0, "meas_height");
-    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_height");
-    
-    // E. 渲染体宽线 (黄色)
-    m_viewer->addLine<PointT>(results.width_p1, results.width_p2, 1.0, 1.0, 0.0, "meas_width");
-    m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 4, "meas_width");
-
-    // F. 定义一个 Lambda 专门画轮廓多边形
-    auto drawContour = [this](PointCloudT::Ptr contour, std::string id, double r, double g, double b) {
-        if (!contour || contour->size() < 3) return;
-        for (size_t i = 0; i < contour->size() - 1; ++i) {
-            this->m_viewer->addLine(contour->points[i], contour->points[i + 1], r, g, b, id + "_" + std::to_string(i));
-            this->m_viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_LINE_WIDTH, 3, id + "_" + std::to_string(i));
-        }
-        // 闭合线段
-        this->m_viewer->addLine(contour->points.back(), contour->points.front(), r, g, b, id + "_close");
-    };
-
-    drawContour(results.chest_contour, "chest", 1.0, 0.5, 0.0); // 橙色
-    drawContour(results.waist_contour, "waist", 0.0, 1.0, 1.0); // 青色
-    drawContour(results.hip_contour,   "hip",   1.0, 0.0, 1.0); // 品红
-
-    // 重置视角
-    m_viewer->resetCamera();
-    m_viewer->getRenderWindow()->Render();
-
-    // 将本次计算结果缓存起来，供导出 CSV 使用
+    // 缓存数据
     m_latestResults = results;
     m_hasResults = true;
 
-    // ==========================================================
-    // 5. 在控制台精美输出结果
-    // ==========================================================
+    // [核心改变] 自动关闭其它所有图层，并激活 "Measurements" 图层
+    for (auto* chk : m_layerChecks) { 
+        chk->blockSignals(true); 
+        chk->setChecked(false); 
+        chk->blockSignals(false); 
+    }
+    // 关闭所有普通点云
+    for (auto it = m_cloudData.begin(); it != m_cloudData.end(); ++it) {
+        m_viewer->removePointCloud(it.key().toStdString());
+    }
+    
+    // 勾选并触发 Measurements 图层，它会自动调用 drawMeasurements()
+    if (m_layerChecks.contains("Measurements")) {
+        m_layerChecks["Measurements"]->setChecked(true);
+        onLayerToggle("Measurements", true);
+    }
+    
+    m_viewer->resetCamera(); // 居中视角
+
+    // 打印结果报告... (保留原来的 log 报告代码)
     log("==============================", "SUCCESS");
     log("       体 尺 测 量 报 告       ", "SUCCESS");
-    log("==============================", "SUCCESS");
     log(QString("▶ 体长 (Body Length) : %1 mm").arg(results.body_length, 0, 'f', 2), "INFO");
     log(QString("▶ 体高 (Body Height) : %1 mm").arg(results.body_height, 0, 'f', 2), "INFO");
     log(QString("▶ 体宽 (Body Width)  : %1 mm").arg(results.body_width, 0, 'f', 2), "INFO");

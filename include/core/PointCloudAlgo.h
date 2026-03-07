@@ -18,6 +18,7 @@
 #include <pcl/common/pca.h>
 #include <pcl/common/common.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
+#include <pcl/registration/ndt.h>
 #include <algorithm>
 #include <cmath>
 
@@ -108,6 +109,16 @@ public:
         int method = 0,     // 0: P2Point, 1: P2Plane
         std::function<void(const QString&, const QString&)> logger = nullptr
     );
+
+    // NDT 配准 (正态分布变换，适合大规模点云)
+    static Eigen::Matrix4f refineRegistrationNDT(
+        const PointCloudT::Ptr& source_cloud,
+        const PointCloudT::Ptr& target_cloud,
+        const Eigen::Matrix4f& initial_guess,
+        float resolution,
+        float step_size,
+        int max_iter,
+        std::function<void(const QString&, const QString&)> logger = nullptr);
 
     // 6. 提取最大连通主体 (欧式聚类)
     static PointCloudT::Ptr extractLargestCluster(

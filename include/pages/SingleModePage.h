@@ -12,6 +12,9 @@
 #include <QDateTime>
 #include <QMessageBox>
 #include "core/PointCloudAlgo.h"
+#include <QFutureWatcher> // 异步监视器
+#include <QtConcurrent>
+#include <vtkCellPicker.h>
 // PCL 相关头文件
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -130,9 +133,21 @@ private:
     QComboBox* m_comboMatrixView;  // 选择当前编辑哪个矩阵
     QTextEdit* m_textMatrix;       // 矩阵输入框
     
+    // 配准模块：动态参数面板控件
+    QWidget *m_icpParamsWidget;       // ICP参数面板
+    QSpinBox *m_spinIcpIter;          // ICP最大迭代次数
+    QDoubleSpinBox *m_spinIcpDist;    // ICP最大对应距离
+
+    QWidget *m_ndtParamsWidget;       // NDT参数面板
+    QDoubleSpinBox *m_spinNdtRes;     // NDT网格分辨率
+    QDoubleSpinBox *m_spinNdtStep;    // NDT搜索步长
+    QSpinBox *m_spinNdtIter;          // NDT最大迭代次数
+
     // 勾选哪些源云参与配准
     QMap<QString, QCheckBox*> m_sourceChecks; // Key: "LB", "LT"...
     
+    QPushButton *m_btnRunReg; // [新增] 将“执行配准”按钮提升为成员变量
+
     // 辅助函数：将矩阵转为字符串显示
     QString matrixToString(const Eigen::Matrix4d& mat);
     // 辅助函数：将字符串解析为矩阵
@@ -186,4 +201,7 @@ private:
     // 缓存最新的体尺计算结果，供导出 CSV 时使用
     BodySizeResults m_latestResults;
     bool m_hasResults = false; // 标记是否已经成功计算过
+
+    void drawMeasurements();  // 绘制测量结果
+    void clearMeasurements(); // 清除测量结果
 };

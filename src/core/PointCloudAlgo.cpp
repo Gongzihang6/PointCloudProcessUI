@@ -1,6 +1,7 @@
 #include "core/PointCloudAlgo.h"
 #include <iostream>
 
+// 点云下采样
 PointCloudT::Ptr PointCloudAlgo::downsample(PointCloudT::Ptr cloud_in, float leaf_size_mm) {
     if (!cloud_in || cloud_in->empty()) {
         return nullptr;
@@ -25,6 +26,7 @@ PointCloudT::Ptr PointCloudAlgo::downsample(PointCloudT::Ptr cloud_in, float lea
     return cloud_out;
 }
 
+// 点云统计滤波移除离群点
 PointCloudT::Ptr PointCloudAlgo::statisticalOutlierRemoval(PointCloudT::Ptr cloud_in, int mean_k, double std_dev_mul) {
     if (!cloud_in || cloud_in->empty()) return nullptr;
 
@@ -42,6 +44,7 @@ PointCloudT::Ptr PointCloudAlgo::statisticalOutlierRemoval(PointCloudT::Ptr clou
     return cloud_out;
 }
 
+// 基于距离阈值的裁剪
 PointCloudT::Ptr PointCloudAlgo::distanceClip(PointCloudT::Ptr cloud_in, float radius_mm) {
     if (!cloud_in || cloud_in->empty()) return nullptr;
 
@@ -79,9 +82,7 @@ PointCloudT::Ptr PointCloudAlgo::transformCloud(PointCloudT::Ptr cloud_in, const
     return cloud_out;
 }
 
-// =========================================================
-// 辅助函数：计算法线
-// =========================================================
+// 计算发现的辅助函数（点到面ICP需要法线）
 PointCloudNormalT::Ptr PointCloudAlgo::computeNormals(PointCloudT::Ptr cloud, double radius) {
     // 创建法线估计对象 (使用 OpenMP 多核加速)
     pcl::NormalEstimationOMP<PointT, PointNormalT> ne;
@@ -121,13 +122,13 @@ PointCloudNormalT::Ptr PointCloudAlgo::computeNormals(PointCloudT::Ptr cloud, do
 
 // ICP 配准
 std::pair<PointCloudT::Ptr, Eigen::Matrix4d> PointCloudAlgo::alignICP(
-    PointCloudT::Ptr cloud_source,
-    PointCloudT::Ptr cloud_target,
-    const Eigen::Matrix4d& init_guess,
-    int max_iter,
-    double dist_thresh,
-    int method, // 0: P2Point, 1: P2Plane
-    std::function<void(const QString&, const QString&)> logger)
+    PointCloudT::Ptr cloud_source,          // 源点云
+    PointCloudT::Ptr cloud_target,          // 目标点云
+    const Eigen::Matrix4d& init_guess,      // 初始变换猜测
+    int max_iter,                           // 最大迭代次数
+    double dist_thresh,                     // 距离阈值 (对应点对之间的最大距离)
+    int method, // 0: P2Point, 1: P2Plane   // 点到点或点到面 ICP 模式选择
+    std::function<void(const QString&, const QString&)> logger)     // 日志回调函数
 {
     if (!cloud_source || !cloud_target) return {nullptr, Eigen::Matrix4d::Identity()};
 
@@ -213,6 +214,57 @@ std::pair<PointCloudT::Ptr, Eigen::Matrix4d> PointCloudAlgo::alignICP(
     }
 
     return {cloud_aligned, final_transform};
+}
+
+
+/*
+ * 作用：执行 NDT (正态分布变换) 点云精细配准
+ * 功能：将源点云向目标点云进行高精度对齐，返回优化后的 4x4 变换矩阵。
+ * 实现了什么：弥补硬件标定矩阵在实际物理安装中产生的微小偏差。
+ * 怎么实现的：
+ * 1. 使用 PCL 的 NormalDistributionsTransform 类。
+ * 2. 接收预先标定好的矩阵作为 initial_guess（初始猜测），这是 NDT 收敛的关键。
+ * 3. 将目标点云划分为指定 resolution 的体素网格并计算正态分布，然后通过牛顿法迭代寻找最优变换。
+ */
+Eigen::Matrix4f PointCloudAlgo::refineRegistrationNDT(
+    const PointCloudT::Ptr& source_cloud,
+    const PointCloudT::Ptr& target_cloud,
+    const Eigen::Matrix4f& initial_guess,
+    float resolution,
+    float step_size,
+    int max_iter,
+    std::function<void(const QString&, const QString&)> logger)
+{
+    if (!source_cloud || source_cloud->empty() || !target_cloud || target_cloud->empty()) {
+        if(logger) logger("NDT 配准失败：输入点云为空。", "ERROR");
+        return initial_guess;
+    }
+
+    pcl::NormalDistributionsTransform<PointT, PointT> ndt;
+    // 设置 NDT 算法参数
+    ndt.setTransformationEpsilon(0.01); // 收敛条件：连续两次变换差异小于此值
+    ndt.setStepSize(step_size);         // 莫尔-牛顿法优化的步长
+    ndt.setResolution(resolution);      // 网格分辨率 (非常重要，通常设为被测物体尺寸的 1/10 左右)
+    ndt.setMaximumIterations(max_iter); // 最大迭代次数
+
+    ndt.setInputSource(source_cloud);
+    ndt.setInputTarget(target_cloud);
+
+    PointCloudT::Ptr output_cloud(new PointCloudT);
+    
+    // 执行配准，必须传入初始猜测矩阵
+    ndt.align(*output_cloud, initial_guess);
+
+    if (ndt.hasConverged()) {
+        if(logger) {
+            QString msg = QString("NDT 配准收敛！得分为: %1 (越小越好)").arg(ndt.getFitnessScore());
+            logger(msg, "SUCCESS");
+        }
+        return ndt.getFinalTransformation();
+    } else {
+        if(logger) logger("NDT 未能收敛，回退使用原始标定矩阵。", "WARN");
+        return initial_guess;
+    }
 }
 
 
