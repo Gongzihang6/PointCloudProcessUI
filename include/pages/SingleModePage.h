@@ -78,6 +78,8 @@ private slots:
     void onExportMergedCloud();
     void onExportBodyCloud();
     void onExportReport();
+    // [新增] 导出可视化点云
+    void onExportVizCloud();
 private:
     // UI布局初始化函数，左侧面板、中心视图、右侧面板分别初始化
     void initLeftPanel();

@@ -29,6 +29,13 @@ add_definitions(${PCL_DEFINITIONS})
 # 6. 添加可执行文件 (建议加上 WIN32 防止弹出黑框)
 add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${HEADERS})
 
+# ==========================================
+# 解决 Debug 模式下 PCL/Eigen 导致 obj 文件过大的问题
+# ==========================================
+if(MSVC)
+    target_compile_options(PointCloudProcessUI PRIVATE /bigobj)
+endif()
+
 # 7. 链接库
 target_link_libraries(${PROJECT_NAME} PRIVATE 
     Qt6::Widgets 
