@@ -6,6 +6,7 @@
 #include <pcl/registration/icp.h>
 #include <pcl/registration/icp_nl.h> // 点到面通常是非线性的，或者用 WithNormals
 #include <pcl/features/normal_3d_omp.h> // OMP 加速法线计算
+#include <pcl/registration/gicp.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/common/transforms.h>  // 用于 pcl::transformPointCloud
@@ -24,7 +25,10 @@
 
 #include <functional> // 用于 std::function
 #include <QString>
-
+#include <QFile>
+#include <QByteArray>
+#include <QMap>
+#include <opencv2/opencv.hpp>
 // 定义常用点云类型
 using PointT = pcl::PointXYZ;
 using PointCloudT = pcl::PointCloud<PointT>;
@@ -33,6 +37,34 @@ using PointCloudT = pcl::PointCloud<PointT>;
 using PointNormalT = pcl::PointNormal;
 using PointCloudNormalT = pcl::PointCloud<PointNormalT>;
 
+// [新增] 传感器类型枚举
+enum class SensorType {
+    COLOR,
+    DEPTH
+};
+// [新增] 相机外参 (Extrinsics: Depth to Color)
+struct CameraExtrinsics {
+    float R[9]; // 3x3 旋转矩阵
+    float T[3]; // 1x3 平移向量 (单位: mm)
+};
+// 定义一个结构体来存储相机内参，用于深度图转点云时使用
+struct CameraIntrinsics {
+    int width, height;
+    float fx, fy, cx, cy;
+    float k1, k2, k3, k4, k5, k6;
+    float p1, p2;
+};
+// [新增] 描述单台设备所有参数的数据包
+struct CameraDeviceParams {
+    QString roleName;     // 视角代号: Top, LB, LT, RB, RT
+    QString serialNumber; // 物理序列号: CL8NB...
+    
+    CameraExtrinsics extrinsics; // 相机外参
+    
+    // 内参字典 (Key 格式如: "1920x1080" 或 "1024x1024")
+    QMap<QString, CameraIntrinsics> colorIntrinsics; 
+    QMap<QString, CameraIntrinsics> depthIntrinsics; 
+};
 // 封装体尺计算相关数据
 struct BodySizeResults {
     // 1. 数值结果
@@ -120,6 +152,17 @@ public:
         int max_iter,
         std::function<void(const QString&, const QString&)> logger = nullptr);
 
+    // [新增] G-ICP 配准函数声明
+    static std::pair<PointCloudT::Ptr, Eigen::Matrix4d> alignGICP(
+        const PointCloudT::Ptr& source_cloud,
+        const PointCloudT::Ptr& target_cloud,
+        const Eigen::Matrix4d& initial_guess,
+        int max_iter,
+        double max_dist,
+        double transformation_epsilon,
+        std::function<void(const QString&, const QString&)> logger = nullptr);
+
+
     // 6. 提取最大连通主体 (欧式聚类)
     static PointCloudT::Ptr extractLargestCluster(
         PointCloudT::Ptr input_cloud, 
@@ -139,6 +182,16 @@ public:
         float skel_radius, 
         float height_angle,
         std::function<void(const QString&, const QString&)> logger = nullptr);
+
+    // [新增] 从 16-bit RAW 深度图转换为点云
+    static PointCloudT::Ptr convertRawDepthToPointCloud(
+        const QString& rawFilePath, 
+        const CameraIntrinsics& intr);
+
+    // [新增] 获取某一台相机的【全套】物理参数
+    static CameraDeviceParams getCameraParams(const QString& camKey);
+    // [新增] 便捷函数：直接获取特定类型、特定分辨率下的内参
+    static CameraIntrinsics getCameraIntrinsics(const QString& camKey, SensorType type, int width, int height);
 
 private:
     // 内部辅助函数：将点云转换为带法线的点云 (用于点到面 ICP)

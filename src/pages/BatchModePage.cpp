@@ -112,7 +112,7 @@ void BatchModePage::initUI() {
 
     QGroupBox *grpReg = new QGroupBox("2. 配准参数");
     QGridLayout *regLay = new QGridLayout(grpReg);
-    m_comboRegAlgo = new QComboBox(); m_comboRegAlgo->addItems({"手动矩阵", "ICP (P2Point)", "ICP (P2Plane)", "NDT 微调"});
+    m_comboRegAlgo = new QComboBox(); m_comboRegAlgo->addItems({"手动矩阵", "ICP (P2Point)", "ICP (P2Plane)", "NDT 微调", "G-ICP"});
     regLay->addWidget(new QLabel("算法:"), 0,0); regLay->addWidget(m_comboRegAlgo, 0,1);
     
     m_spinIcpIter = new QSpinBox(); m_spinIcpIter->setValue(60); m_spinIcpIter->setMaximum(500); regLay->addWidget(new QLabel("ICP 迭代次数:"), 1,0); regLay->addWidget(m_spinIcpIter, 1,1);
@@ -196,6 +196,9 @@ BatchParams BatchModePage::collectParams() {
     p.ndtRes = m_spinNdtRes->value();
     p.ndtStep = m_spinNdtStep->value();
     p.ndtIter = m_spinNdtIter->value();
+    p.gicpIter = m_spinGicpIter->value();
+    p.gicpDist = m_spinGicpDist->value();
+    p.gicpEps  = 1e-8; 
     p.ransacThresh = m_spinRansac->value();
     p.clusterTol = m_spinTol->value();
     p.minClusterSize = m_spinMinSize->value();
@@ -356,6 +359,9 @@ WorkerRegTask processSingleCloud(WorkerRegTask task) {
             Eigen::Matrix4f guess_f = guessMat.cast<float>();
             Eigen::Matrix4f final_f = PointCloudAlgo::refineRegistrationNDT(p3, task.targetCloud, guess_f, task.params.ndtRes, task.params.ndtStep, task.params.ndtIter);
             task.resultCloud = PointCloudAlgo::transformCloud(p3, final_f.cast<double>());
+        } else if (task.params.regMethod == 4) {
+            auto res = PointCloudAlgo::alignGICP(p3, task.targetCloud, guessMat, task.params.gicpIter, task.params.gicpDist, task.params.gicpEps);
+            task.resultCloud = res.first;
         } else {
             task.resultCloud = PointCloudAlgo::transformCloud(p3, guessMat);
         }
@@ -402,20 +408,56 @@ void BatchWorker::run() {
         QString outPath = m_params.outputDir + "/" + folderName;
         QDir().mkpath(outPath);
 
+
+        // =======================================================
+        // [新增] 局部初始化默认相机内参 (用于 1024x1024 RAW 深度图转换)
+        // 这些参数来源于物理标定文件，在子线程中直接硬编码非常安全高效
+        // =======================================================
+        QMap<QString, CameraIntrinsics> defaultIntrinsics;
+        defaultIntrinsics["Top"] = {504.488007f, 504.548981f, 515.691956f, 516.099609f, 1024, 1024}; // 005J
+        defaultIntrinsics["LB"]  = {504.507996f, 504.420441f, 523.245239f, 513.824890f, 1024, 1024}; // 00SE
+        defaultIntrinsics["LT"]  = {504.837738f, 504.902527f, 537.253601f, 504.862488f, 1024, 1024}; // 003W
+        defaultIntrinsics["RB"]  = {505.278992f, 505.316833f, 519.487793f, 507.828064f, 1024, 1024}; // 00YA
+        defaultIntrinsics["RT"]  = {504.503265f, 504.484131f, 531.310181f, 516.973572f, 1024, 1024}; // 00X6
+
+
         // 2. 加载当前文件夹下的点云
         QDir currentDir(folderPath);
-        QStringList pcdFiles = currentDir.entryList({"*_d_pc.pcd"}, QDir::Files);
+        // [修改] 过滤器同时支持提取 .pcd 和 .raw 文件
+        QStringList nameFilters;
+        nameFilters << "*_d_pc.pcd" << "*_depth_raw.raw";
+        QStringList targetFiles = currentDir.entryList(nameFilters, QDir::Files);
         
         QMap<QString, PointCloudT::Ptr> clouds;
         QMap<QString, QString> keyMap = { {"005J","Top"}, {"00SE","LB"}, {"003W","LT"}, {"00YA","RB"}, {"00X6","RT"} };
         
-        for (const QString& file : pcdFiles) {
+        for (const QString& file : targetFiles) {
             for (auto it = keyMap.begin(); it != keyMap.end(); ++it) {
-                if (file.contains(it.key())) {
+                // 匹配设备编号
+                if (file.contains(it.key(), Qt::CaseInsensitive)) {
+                    QString absPath = currentDir.absoluteFilePath(file);
+                    QString camKey = it.value();
                     PointCloudT::Ptr cloud(new PointCloudT);
-                    if (pcl::io::loadPCDFile<PointT>(currentDir.absoluteFilePath(file).toStdString(), *cloud) == 0) {
-                        clouds[it.value()] = cloud;
+                    
+                    // =======================================================
+                    // [核心修改] 根据文件后缀名分支，动态解析
+                    // =======================================================
+                    if (file.endsWith(".raw", Qt::CaseInsensitive)) {
+                        // 调用刚才写好的底层静态库，使用对应的相机内参解析深度图
+                        cloud = PointCloudAlgo::convertRawDepthToPointCloud(absPath, defaultIntrinsics[camKey]);
+                        if (cloud && !cloud->empty()) {
+                            clouds[camKey] = cloud;
+                        } else {
+                            emit logMessage(QString("RAW 解析失败或为空: %1").arg(file), "WARN");
+                        }
+                    } else {
+                        // 传统的 PCD 加载方式
+                        if (pcl::io::loadPCDFile<PointT>(absPath.toStdString(), *cloud) == 0) {
+                            clouds[camKey] = cloud;
+                        }
                     }
+                    
+                    break; // 匹配到当前相机编号后，跳出内层循环，继续处理下一个文件
                 }
             }
         }

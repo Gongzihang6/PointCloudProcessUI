@@ -13,6 +13,13 @@ set(CMAKE_PREFIX_PATH "F:/dev/Qt/6.9.3/msvc2022_64")
 # 2. [核心修复] 查找库时，必须加上 OpenGLWidgets
 find_package(Qt6 COMPONENTS Widgets Gui Core OpenGLWidgets Network Concurrent REQUIRED)
 
+
+find_package(OpenCV REQUIRED COMPONENTS core imgproc)
+message(STATUS "Found OpenCV version: ${OpenCV_VERSION}")
+include_directories(${OpenCV_INCLUDE_DIRS})
+add_definitions(${OpenCV_DEFINITIONS})
+
+
 # 3. 包含头文件目录
 include_directories(include)
 
@@ -44,6 +51,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::OpenGLWidgets  # 现在上面 find_package 找到了，这里才能链接成功
     Qt6::Network
     Qt6::Concurrent
+    ${OpenCV_LIBS}
     ${PCL_LIBRARIES}
 )
 

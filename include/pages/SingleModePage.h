@@ -15,6 +15,9 @@
 #include <QFutureWatcher> // 异步监视器
 #include <QtConcurrent>
 #include <vtkCellPicker.h>
+#include <QDialog>
+#include <QTableWidget>
+#include <QHeaderView>
 // PCL 相关头文件
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -80,6 +83,8 @@ private slots:
     void onExportReport();
     // [新增] 导出可视化点云
     void onExportVizCloud();
+
+    void onSetIntrinsics(); // [新增] 弹出内参设置对话框
 private:
     // UI布局初始化函数，左侧面板、中心视图、右侧面板分别初始化
     void initLeftPanel();
@@ -145,6 +150,12 @@ private:
     QDoubleSpinBox *m_spinNdtStep;    // NDT搜索步长
     QSpinBox *m_spinNdtIter;          // NDT最大迭代次数
 
+    // [新增] G-ICP 参数面板控件
+    QWidget *m_gicpParamsWidget;
+    QSpinBox *m_spinGicpIter;
+    QDoubleSpinBox *m_spinGicpDist;
+    QDoubleSpinBox *m_spinGicpEps;
+    
     // 勾选哪些源云参与配准
     QMap<QString, QCheckBox*> m_sourceChecks; // Key: "LB", "LT"...
     
@@ -206,4 +217,8 @@ private:
 
     void drawMeasurements();  // 绘制测量结果
     void clearMeasurements(); // 清除测量结果
+
+    // [新增] 存储当前系统的相机内参
+    QMap<QString, CameraIntrinsics> m_intrinsicsMap;
+    void initDefaultIntrinsics(); // 初始化硬编码的内参
 };

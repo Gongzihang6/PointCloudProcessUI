@@ -53,6 +53,11 @@ struct RegTaskInput {
     float ndtRes;
     float ndtStep;
     int ndtIter;
+
+    // [新增]
+    int gicpIter;
+    double gicpDist;
+    double gicpEps;
 };
 
 struct RegTaskOutput {
@@ -91,7 +96,14 @@ RegTaskOutput processRegistrationWorker(const RegTaskInput& input) {
         output.finalTransform = final_f.cast<double>();
         output.cloudAlignedLocal = PointCloudAlgo::transformCloud(input.cloudSrc, output.finalTransform);
     }
-    
+    else if (input.methodIndex == 4) {  // G-ICP
+        auto result = PointCloudAlgo::alignGICP(
+            input.cloudSrc, input.cloudTarget, input.initialGuess, 
+            input.gicpIter, input.gicpDist, input.gicpEps, logBridge
+        );
+        output.cloudAlignedLocal = result.first;
+        output.finalTransform = result.second;
+    }
     return output;
 }
 
@@ -193,6 +205,7 @@ SingleModePage::SingleModePage(QWidget *parent) : QWidget(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
+    initDefaultIntrinsics();
     // 初始化三个面板
     initLeftPanel();
     initCenterView();
@@ -260,9 +273,15 @@ void SingleModePage::initLeftPanel() {
     clearBtn->setStyleSheet("color: #f56c6c;"); 
     connect(clearBtn, &QPushButton::clicked, this, &SingleModePage::onClearFiles);
 
+    // 3. 内参设置按钮
+    QPushButton *btnIntrinsics = new QPushButton("⚙️ 内参");
+    btnIntrinsics->setToolTip("修改 RAW 深度图转换为点云的相机内参");
+    connect(btnIntrinsics, &QPushButton::clicked, this, &SingleModePage::onSetIntrinsics);
+
     // 将按钮加入水平布局
-    bottomBtnLayout->addWidget(loadFolderBtn, 3); // 比例 3
-    bottomBtnLayout->addWidget(clearBtn, 1);      // 比例 1
+    bottomBtnLayout->addWidget(loadFolderBtn, 4); // 比例 3
+    bottomBtnLayout->addWidget(btnIntrinsics, 2); 
+    bottomBtnLayout->addWidget(clearBtn, 2);      // 比例 1
 
     // 将水平布局加入主垂直布局
     layout->addLayout(bottomBtnLayout);
@@ -598,7 +617,7 @@ void SingleModePage::initRightPanel() {
     auto *rowAlgo = new QHBoxLayout();
     rowAlgo->addWidget(new QLabel("算法:"));
     m_comboRegMethod = new QComboBox();
-    m_comboRegMethod->addItems({"手动矩阵 (Manual)", "ICP (P2Point)", "ICP (P2Plane)", "NDT 配准微调"});
+    m_comboRegMethod->addItems({"手动矩阵 (Manual)", "ICP (P2Point)", "ICP (P2Plane)", "NDT 配准微调", "G-ICP"});
     rowAlgo->addWidget(m_comboRegMethod);
     lay2->addLayout(rowAlgo);
 
@@ -658,16 +677,49 @@ void SingleModePage::initRightPanel() {
     lay2->addWidget(m_ndtParamsWidget);
 
     // ==========================================
-    // [新增] 面板显示/隐藏逻辑联动
+    // [新增] 动态参数面板：G-ICP 参数
     // ==========================================
-    m_icpParamsWidget->setVisible(false); // 默认隐藏
-    m_ndtParamsWidget->setVisible(false); // 默认隐藏
+    m_gicpParamsWidget = new QWidget();
+    auto *gicpLay = new QGridLayout(m_gicpParamsWidget);
+    gicpLay->setContentsMargins(15, 0, 0, 0);
+
+    gicpLay->addWidget(new QLabel("最大迭代次数:"), 0, 0);
+    m_spinGicpIter = new QSpinBox(); 
+    m_spinGicpIter->setRange(1, 500); 
+    m_spinGicpIter->setValue(50);
+    m_spinGicpIter->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    gicpLay->addWidget(m_spinGicpIter, 0, 1);
+
+    gicpLay->addWidget(new QLabel("最大对应距离(mm):"), 1, 0);
+    m_spinGicpDist = new QDoubleSpinBox(); 
+    m_spinGicpDist->setRange(1.0, 500.0); 
+    m_spinGicpDist->setValue(50.0); // 默认 5cm = 50mm
+    m_spinGicpDist->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    gicpLay->addWidget(m_spinGicpDist, 1, 1);
+
+    gicpLay->addWidget(new QLabel("收敛极小值(Epsilon):"), 2, 0);
+    m_spinGicpEps = new QDoubleSpinBox(); 
+    m_spinGicpEps->setRange(1e-9, 1e-1); 
+    m_spinGicpEps->setDecimals(8);   // 允许输入 8 位小数
+    m_spinGicpEps->setSingleStep(1e-8);
+    m_spinGicpEps->setValue(1e-8);
+    m_spinGicpEps->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    gicpLay->addWidget(m_spinGicpEps, 2, 1);
+
+    lay2->addWidget(m_gicpParamsWidget);
+
+    // ==========================================
+    // [修改] 面板显示/隐藏逻辑联动
+    // ==========================================
+    m_icpParamsWidget->setVisible(false);
+    m_ndtParamsWidget->setVisible(false);
+    m_gicpParamsWidget->setVisible(false); // 默认隐藏
 
     connect(m_comboRegMethod, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
-        m_icpParamsWidget->setVisible(index == 1 || index == 2); // 选中ICP时显示
-        m_ndtParamsWidget->setVisible(index == 3);               // 选中NDT时显示
+        m_icpParamsWidget->setVisible(index == 1 || index == 2); 
+        m_ndtParamsWidget->setVisible(index == 3);               
+        m_gicpParamsWidget->setVisible(index == 4); // 选中 G-ICP 时显示
     });
-
 
     // 2.2 参与配准的源点云选择
     QLabel* lblSrc = new QLabel("选择待配准源 (Target=Top):");
@@ -1024,9 +1076,9 @@ void SingleModePage::initRightPanel() {
 void SingleModePage::onBrowseFile(const QString& key) {
     QString fileName = QFileDialog::getOpenFileName(
         this, 
-        "选择点云文件 (" + key + ")", 
+        "选择点云或深度图文件 (" + key + ")", 
         "", 
-        "Point Cloud Files (*.pcd *.ply);;All Files (*)"
+        "Point Cloud Files (*.pcd *.ply *.raw);;All Files (*)"
     );
 
     if (!fileName.isEmpty()) {
@@ -1058,7 +1110,7 @@ void SingleModePage::onLoadFolder() {
     if (dirPath.isEmpty()) return;
 
     QDir dir(dirPath);
-    QStringList filters; filters << "*.pcd";
+    QStringList filters; filters << "*.pcd" << "*.raw";
     QFileInfoList fileList = dir.entryInfoList(filters, QDir::Files);
 
     QMap<QString, QString> keyMap;
@@ -1080,8 +1132,9 @@ void SingleModePage::onLoadFolder() {
         QString fileName = fileInfo.fileName();
 
         // 后缀检查
-        if (!fileName.endsWith(targetSuffix, Qt::CaseInsensitive)) {
-            continue; 
+        if (!fileName.endsWith("_d_pc.pcd", Qt::CaseInsensitive) && 
+                !fileName.endsWith("_depth_raw.raw", Qt::CaseInsensitive)) {
+                continue; 
         }
         
         // 遍历 ID 匹配
@@ -1162,25 +1215,38 @@ QString SingleModePage::getFullPath(const QString& camKey) const {
 void SingleModePage::loadCloudToMemory(const QString& key, const QString& filePath) {
     if (filePath.isEmpty()) return;
 
-    // 添加一条正在加载的日志
     log(QString("正在加载文件: %1 ...").arg(filePath), "INFO");
-
     PointCloudT::Ptr cloud(new PointCloudT);
-    if (pcl::io::loadPCDFile<PointT>(filePath.toStdString(), *cloud) == -1) {
-        log("无法读取文件: " + filePath, "ERROR"); // 输出错误日志
-        QMessageBox::warning(this, "加载失败", "无法读取点云文件:\n" + filePath);
-        return;
+
+    // [核心修改] 拦截扩展名分支
+    if (filePath.endsWith(".raw", Qt::CaseInsensitive)) {
+        // 使用内参引擎解析 .raw
+        cloud = PointCloudAlgo::convertRawDepthToPointCloud(filePath, m_intrinsicsMap[key]);
+        if (!cloud || cloud->empty()) {
+            log("RAW 深度图转换失败！请检查文件完整性或确认内参分辨率(默认1024x1024)。", "ERROR");
+            QMessageBox::warning(this, "加载失败", "RAW 深度图解析失败，请检查内参分辨率。");
+            return;
+        }
+        log(QString("RAW 深度图已成功转为点云 [%1]: 生成点数 %2").arg(key).arg(cloud->size()), "SUCCESS");
+    } 
+    else {
+        // 原有 PCL 加载逻辑
+        if (pcl::io::loadPCDFile<PointT>(filePath.toStdString(), *cloud) == -1) {
+            log("无法读取 PCD 文件: " + filePath, "ERROR");
+            QMessageBox::warning(this, "加载失败", "无法读取点云文件:\n" + filePath);
+            return;
+        }
+        log(QString("加载 PCD 成功 [%1]: 点数 %2").arg(key).arg(cloud->size()), "SUCCESS");
     }
 
+    // 存入内存
     m_cloudData[key] = cloud;
     
-    // 输出成功日志
-    log(QString("加载成功 [%1]: 点数 %2").arg(key).arg(cloud->size()), "SUCCESS");
-
     if (m_layerChecks.contains(key)) {
         m_layerChecks[key]->setChecked(true); 
     }
 }
+
 
 void SingleModePage::onLayerToggle(const QString& layerId, bool checked) {
     if (!m_viewer) return;
@@ -1495,12 +1561,17 @@ void SingleModePage::onExecuteRegistration() {
         task.algoType = (methodIndex == 2) ? PointCloudAlgo::P2Plane : PointCloudAlgo::P2Point;
         
         // UI 参数抓取
+        // ICP 参数
         task.icpIter = m_spinIcpIter->value();
         task.icpDist = m_spinIcpDist->value();
+        // NDT 参数
         task.ndtRes = m_spinNdtRes->value();
         task.ndtStep = m_spinNdtStep->value();
         task.ndtIter = m_spinNdtIter->value();
-
+        // GICP 参数
+        task.gicpIter = m_spinGicpIter->value();
+        task.gicpDist = m_spinGicpDist->value();
+        task.gicpEps = m_spinGicpEps->value();
         tasks.append(task);
     }
 
@@ -2332,4 +2403,59 @@ void SingleModePage::onExportVizCloud() {
     } else {
         log("❌ 可视化点云保存失败！", "ERROR");
     }
+}
+
+
+
+void SingleModePage::initDefaultIntrinsics() {
+    m_intrinsicsMap["Top"] = PointCloudAlgo::getCameraIntrinsics("Top", SensorType::DEPTH, 512, 512);
+    m_intrinsicsMap["LB"]  = PointCloudAlgo::getCameraIntrinsics("LB",  SensorType::DEPTH, 512, 512);
+    m_intrinsicsMap["LT"]  = PointCloudAlgo::getCameraIntrinsics("LT",  SensorType::DEPTH, 512, 512);
+    m_intrinsicsMap["RB"]  = PointCloudAlgo::getCameraIntrinsics("RB",  SensorType::DEPTH, 512, 512);
+    m_intrinsicsMap["RT"]  = PointCloudAlgo::getCameraIntrinsics("RT",  SensorType::DEPTH, 512, 512);
+}
+
+
+// [新增] 弹出一个极简的专业内参配置表格
+void SingleModePage::onSetIntrinsics() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("⚙️ 自定义相机内参 (RAW -> PCD)");
+    dlg.resize(650, 250);
+    QVBoxLayout *lay = new QVBoxLayout(&dlg);
+
+    QTableWidget *table = new QTableWidget(5, 6, &dlg);
+    table->setHorizontalHeaderLabels({"fx", "fy", "cx", "cy", "Width", "Height"});
+    table->setVerticalHeaderLabels({"Top", "LB", "LT", "RB", "RT"});
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    
+    QStringList keys = {"Top", "LB", "LT", "RB", "RT"};
+    for (int r = 0; r < keys.size(); ++r) {
+        CameraIntrinsics intr = m_intrinsicsMap[keys[r]];
+        table->setItem(r, 0, new QTableWidgetItem(QString::number(intr.fx, 'f', 4)));
+        table->setItem(r, 1, new QTableWidgetItem(QString::number(intr.fy, 'f', 4)));
+        table->setItem(r, 2, new QTableWidgetItem(QString::number(intr.cx, 'f', 4)));
+        table->setItem(r, 3, new QTableWidgetItem(QString::number(intr.cy, 'f', 4)));
+        table->setItem(r, 4, new QTableWidgetItem(QString::number(intr.width)));
+        table->setItem(r, 5, new QTableWidgetItem(QString::number(intr.height)));
+    }
+    lay->addWidget(table);
+
+    QPushButton *btnSave = new QPushButton("💾 保存并应用", &dlg);
+    lay->addWidget(btnSave);
+
+    connect(btnSave, &QPushButton::clicked, [&]() {
+        for (int r = 0; r < keys.size(); ++r) {
+            QString key = keys[r];
+            m_intrinsicsMap[key].fx = table->item(r, 0)->text().toFloat();
+            m_intrinsicsMap[key].fy = table->item(r, 1)->text().toFloat();
+            m_intrinsicsMap[key].cx = table->item(r, 2)->text().toFloat();
+            m_intrinsicsMap[key].cy = table->item(r, 3)->text().toFloat();
+            m_intrinsicsMap[key].width = table->item(r, 4)->text().toInt();
+            m_intrinsicsMap[key].height = table->item(r, 5)->text().toInt();
+        }
+        log("相机内参已更新，下次加载 RAW 文件将使用新参数。", "INFO");
+        dlg.accept();
+    });
+
+    dlg.exec();
 }

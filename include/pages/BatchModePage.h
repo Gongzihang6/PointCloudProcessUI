@@ -34,11 +34,18 @@ struct BatchParams {
 
     // 配准参数
     int regMethod = 0; // 0: 手动矩阵, 1: ICP(点到点), 2: ICP(点到面), 3: NDT
+    // ICP 参数
     int icpIter = 60;
     double icpDist = 100.0;
+    // NDT 参数
     float ndtRes = 100.0f;
     float ndtStep = 0.1f;
     int ndtIter = 35;
+    // G-ICP 参数
+    int gicpIter = 50;
+    double gicpDist = 50.0;
+    double gicpEps = 1e-8;
+
 
     // 主体提取参数
     double ransacThresh = 20.0;
@@ -108,30 +115,37 @@ private:
     BatchParams collectParams(); // 从界面收集参数到结构体
 
     // UI 控件
-    QLineEdit *m_leInput;
-    QLineEdit *m_leOutput;
+    QLineEdit *m_leInput;       // 输入文件夹路径
+    QLineEdit *m_leOutput;      // 输出文件夹路径
     
-    QDoubleSpinBox *m_spinLeaf;
-    QDoubleSpinBox *m_spinStd;
-    QSpinBox       *m_spinMeanK;
-    QDoubleSpinBox *m_spinClip;
+    // 预处理参数控件
+    QDoubleSpinBox *m_spinLeaf;     // 体素下采样参数
+    QDoubleSpinBox *m_spinStd;      // 统计滤波参数
+    QSpinBox       *m_spinMeanK;    // 统计滤波参数
+    QDoubleSpinBox *m_spinClip;     // 距离裁剪参数
 
+    // 配准参数控件
     QComboBox      *m_comboRegAlgo;
     QSpinBox       *m_spinIcpIter;
     QDoubleSpinBox *m_spinIcpDist;
     QDoubleSpinBox *m_spinNdtRes;
     QDoubleSpinBox *m_spinNdtStep;
     QSpinBox       *m_spinNdtIter;
+    QDoubleSpinBox *m_spinGicpDist;
+    QSpinBox       *m_spinGicpIter;
 
+    // 主体提取（欧式聚类）参数控件
     QDoubleSpinBox *m_spinRansac;
     QDoubleSpinBox *m_spinTol;
     QSpinBox       *m_spinMinSize;
 
+    // 体尺测量参数控件
     QDoubleSpinBox *m_spinGirthThick;
     QDoubleSpinBox *m_spinSkelStep;
     QDoubleSpinBox *m_spinSkelRadius;
     QDoubleSpinBox *m_spinHeightAngle;
 
+    // 流程控制按钮和显示控件
     QPushButton  *m_btnStart;
     QPushButton  *m_btnStop; // [新增] 停止按钮指针
     QProgressBar *m_progressBar;
