@@ -409,18 +409,6 @@ void BatchWorker::run() {
         QDir().mkpath(outPath);
 
 
-        // =======================================================
-        // [新增] 局部初始化默认相机内参 (用于 1024x1024 RAW 深度图转换)
-        // 这些参数来源于物理标定文件，在子线程中直接硬编码非常安全高效
-        // =======================================================
-        QMap<QString, CameraIntrinsics> defaultIntrinsics;
-        defaultIntrinsics["Top"] = {504.488007f, 504.548981f, 515.691956f, 516.099609f, 1024, 1024}; // 005J
-        defaultIntrinsics["LB"]  = {504.507996f, 504.420441f, 523.245239f, 513.824890f, 1024, 1024}; // 00SE
-        defaultIntrinsics["LT"]  = {504.837738f, 504.902527f, 537.253601f, 504.862488f, 1024, 1024}; // 003W
-        defaultIntrinsics["RB"]  = {505.278992f, 505.316833f, 519.487793f, 507.828064f, 1024, 1024}; // 00YA
-        defaultIntrinsics["RT"]  = {504.503265f, 504.484131f, 531.310181f, 516.973572f, 1024, 1024}; // 00X6
-
-
         // 2. 加载当前文件夹下的点云
         QDir currentDir(folderPath);
         // [修改] 过滤器同时支持提取 .pcd 和 .raw 文件
@@ -429,7 +417,7 @@ void BatchWorker::run() {
         QStringList targetFiles = currentDir.entryList(nameFilters, QDir::Files);
         
         QMap<QString, PointCloudT::Ptr> clouds;
-        QMap<QString, QString> keyMap = { {"005J","Top"}, {"00SE","LB"}, {"003W","LT"}, {"00YA","RB"}, {"00X6","RT"} };
+        QMap<QString, QString> keyMap = { {"005J","Top"}, {"00YA","LB"}, {"00X6","LT"}, {"00SE","RB"}, {"003W","RT"} };
         
         for (const QString& file : targetFiles) {
             for (auto it = keyMap.begin(); it != keyMap.end(); ++it) {
@@ -443,8 +431,10 @@ void BatchWorker::run() {
                     // [核心修改] 根据文件后缀名分支，动态解析
                     // =======================================================
                     if (file.endsWith(".raw", Qt::CaseInsensitive)) {
+                        // [新增] 极致优雅的查表调用，一行代码拿到包含畸变系数在内的全套精准参数！
+                        CameraIntrinsics intr = PointCloudAlgo::getCameraIntrinsics(camKey, SensorType::DEPTH, 512, 512);
                         // 调用刚才写好的底层静态库，使用对应的相机内参解析深度图
-                        cloud = PointCloudAlgo::convertRawDepthToPointCloud(absPath, defaultIntrinsics[camKey]);
+                        cloud = PointCloudAlgo::convertRawDepthToPointCloud(absPath, intr);
                         if (cloud && !cloud->empty()) {
                             clouds[camKey] = cloud;
                         } else {

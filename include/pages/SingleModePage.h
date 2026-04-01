@@ -24,6 +24,8 @@
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/features/normal_3d_omp.h>
 
+#include <opencv2/opencv.hpp>
+#include "OpenPoseInferencer.h"
 // 前置声明，减少头文件依赖
 class QLineEdit;
 class QPushButton;
@@ -73,7 +75,7 @@ private slots:
 
     // 运行关键点预测的槽函数
     void onRunAIInference(); 
-
+    void onRunAIInference2D(); // 2D 本地推理
     // 计算体尺参数的槽函数
     void onCalculateBodySize();
 
@@ -191,7 +193,9 @@ private:
     QList<QLabel*> m_kpBadges;
 
     // 运行 AI 按钮的指针
-    QPushButton *m_btnRunAI;
+    QPushButton *m_btnRunAI3D;
+    QPushButton *m_btnRunAI2D;
+    QLineEdit   *m_leModelPath;
 
     // 手动拾取状态控制
     bool m_isManualPickingMode = false;
@@ -221,4 +225,9 @@ private:
     // [新增] 存储当前系统的相机内参
     QMap<QString, CameraIntrinsics> m_intrinsicsMap;
     void initDefaultIntrinsics(); // 初始化硬编码的内参
+
+    OpenPoseInferencer m_openpose;
+    // [新增] 用于存放 Top 相机的彩色图和对齐深度图
+    cv::Mat m_topColorImage;
+    cv::Mat m_topAlignedDepthImage;
 };

@@ -13,12 +13,15 @@ set(CMAKE_PREFIX_PATH "F:/dev/Qt/6.9.3/msvc2022_64")
 # 2. [核心修复] 查找库时，必须加上 OpenGLWidgets
 find_package(Qt6 COMPONENTS Widgets Gui Core OpenGLWidgets Network Concurrent REQUIRED)
 
-
+# opencv
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 message(STATUS "Found OpenCV version: ${OpenCV_VERSION}")
 include_directories(${OpenCV_INCLUDE_DIRS})
 add_definitions(${OpenCV_DEFINITIONS})
 
+# onnxruntime
+set(ONNXRUNTIME_DIR "F:/github/onnxruntime-win-x64-gpu-1.24.3") # 替换为你的实际路径
+include_directories(${ONNXRUNTIME_DIR}/include)
 
 # 3. 包含头文件目录
 include_directories(include)
@@ -53,7 +56,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Concurrent
     ${OpenCV_LIBS}
     ${PCL_LIBRARIES}
+    ${ONNXRUNTIME_DIR}/lib/onnxruntime.lib
+)
+# 可选：将 onnxruntime.dll 和 onnxruntime_providers_cuda.dll 自动复制到生成目录
+add_custom_command(TARGET PointCloudProcessUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${ONNXRUNTIME_DIR}/lib/onnxruntime.lib"
+    "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
+    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
+    "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
+    $<TARGET_FILE_DIR:PointCloudProcessUI>
 )
 
-
+# cmake --build . --config release --parallel 8
 # F:\dev\Qt\6.9.3\msvc2022_64\bin\windeployqt.exe --release --force "F:\Gongzihang\2026\PointCloudProcessUI\build\Release\PointCloudProcessUI.exe"

@@ -868,35 +868,62 @@ void SingleModePage::initRightPanel() {
     toggleLay->addWidget(btnAI);
     lay4->addWidget(toggleFrame);
 
-    // --- AI 控制区 (模型加载 + 推理) ---
+    // --- AI 控制区 (双路推理引擎) ---
     QWidget *aiWidget = new QWidget();
     QVBoxLayout *aiLay = new QVBoxLayout(aiWidget);
-    aiLay->setContentsMargins(0,0,0,0);
-    aiLay->setSpacing(5);
+    aiLay->setContentsMargins(0, 0, 0, 0);
+    aiLay->setSpacing(8); // 增加一点间距，让两组按钮层次分明
 
+    // ==========================================
+    // 选项 1: 3D 推理 (C/S 架构)
+    // ==========================================
+    m_btnRunAI3D = new QPushButton("☁️ 运行 3D 点云推理 (服务端)");
+    m_btnRunAI3D->setObjectName("WarningBtn"); 
+    m_btnRunAI3D->setFixedHeight(32);
+    aiLay->addWidget(m_btnRunAI3D);
+    connect(m_btnRunAI3D, &QPushButton::clicked, this, &SingleModePage::onRunAIInference);
+
+    // 虚线分割，区分两种 AI 模式
+    QFrame *lineAI = new QFrame();
+    lineAI->setFrameShape(QFrame::HLine);
+    lineAI->setStyleSheet("color: #eee; border-top: 1px dashed #dcdfe6; margin: 2px 0;");
+    aiLay->addWidget(lineAI);
+
+    // ==========================================
+    // 选项 2: 2D 推理 (本地 ONNX)
+    // ==========================================
     auto *fileRow = new QHBoxLayout();
-    QLineEdit *leModel = new QLineEdit("./models/pig_kp_v3.onnx");
-    leModel->setReadOnly(true); 
-    leModel->setStyleSheet("color: #666; background: #f4f4f5; border: none;");
-    QPushButton *btnBrowse = new QPushButton("📂"); btnBrowse->setFixedWidth(30);
-    btnBrowse->setStyleSheet("border: none; background: transparent;");
-    fileRow->addWidget(leModel);
-    fileRow->addWidget(btnBrowse);
+    m_leModelPath = new QLineEdit("F:/Gongzihang/2026/PointCloudProcessUI/build/Release/models/custom_pig_hrnet.onnx"); // 默认路径
+    m_leModelPath->setReadOnly(true); 
+    m_leModelPath->setStyleSheet("color: #666; background: #f4f4f5; border: none;");
     
-    // 给文件行加个外框，像截图里那样
+    QPushButton *btnBrowseONNX = new QPushButton("📂"); 
+    btnBrowseONNX->setFixedWidth(30);
+    btnBrowseONNX->setStyleSheet("border: none; background: transparent;");
+    
+    fileRow->addWidget(m_leModelPath);
+    fileRow->addWidget(btnBrowseONNX);
+    
+    // 带圆角边框的文件选择框
     QFrame *fileFrame = new QFrame();
     fileFrame->setStyleSheet("border: 1px solid #dcdfe6; border-radius: 4px; background: #f4f4f5;");
     fileFrame->setLayout(fileRow);
-    // 修正 fileRow 的 margin 以适应外框
     fileRow->setContentsMargins(5, 0, 0, 0);
-
     aiLay->addWidget(fileFrame);
 
-    m_btnRunAI = new QPushButton("⚡ 运行模型推理");
-    m_btnRunAI->setObjectName("WarningBtn"); 
-    m_btnRunAI->setFixedHeight(32);
-    aiLay->addWidget(m_btnRunAI);
-    connect(m_btnRunAI, &QPushButton::clicked, this, &SingleModePage::onRunAIInference);  // 连接推理按钮 -> 触发 AI 推理处理
+    m_btnRunAI2D = new QPushButton("🖼️ 运行 2D 图像推理 (本地)");
+    m_btnRunAI2D->setObjectName("WarningBtn"); 
+    m_btnRunAI2D->setFixedHeight(32);
+    aiLay->addWidget(m_btnRunAI2D);
+    connect(m_btnRunAI2D, &QPushButton::clicked, this, &SingleModePage::onRunAIInference2D);
+
+    // 绑定 ONNX 模型文件浏览操作
+    connect(btnBrowseONNX, &QPushButton::clicked, this, [this]() {
+        QString path = QFileDialog::getOpenFileName(this, "选择 ONNX 模型", "", "ONNX Files (*.onnx);;All Files (*)");
+        if (!path.isEmpty()) {
+            m_leModelPath->setText(path);
+        }
+    });
 
     lay4->addWidget(aiWidget);
 
@@ -1115,10 +1142,10 @@ void SingleModePage::onLoadFolder() {
 
     QMap<QString, QString> keyMap;
     keyMap["005J"] = "Top";
-    keyMap["00SE"] = "LB"; 
-    keyMap["003W"] = "LT"; 
-    keyMap["00YA"] = "RB";
-    keyMap["00X6"] = "RT";
+    keyMap["00SE"] = "RB"; 
+    keyMap["003W"] = "RT"; 
+    keyMap["00YA"] = "LB";
+    keyMap["00X6"] = "LT";
 
     // 1. 先清空
     onClearFiles();
@@ -1133,8 +1160,8 @@ void SingleModePage::onLoadFolder() {
 
         // 后缀检查
         if (!fileName.endsWith("_d_pc.pcd", Qt::CaseInsensitive) && 
-                !fileName.endsWith("_depth_raw.raw", Qt::CaseInsensitive)) {
-                continue; 
+                                    !fileName.endsWith("_depth_raw.raw", Qt::CaseInsensitive)) {
+            continue; 
         }
         
         // 遍历 ID 匹配
@@ -1178,22 +1205,28 @@ void SingleModePage::onLoadFolder() {
 void SingleModePage::onClearFiles() {
     for (auto it = m_fileInputs.begin(); it != m_fileInputs.end(); ++it) {
         QLineEdit* edit = it.value();
-        edit->clear();                    // 清空显示的文字
-        edit->setProperty("fullPath", ""); // 清空存储的路径
-        edit->setToolTip("");             // 清空提示
+        edit->clear();                    
+        edit->setProperty("fullPath", ""); 
+        edit->setToolTip("");             
     }
     // 清空内存数据和 3D 视图
     m_cloudData.clear();
     m_viewer->removeAllPointClouds();
     
+    // =======================================================
+    // [新增] 释放 OpenCV 图像矩阵内存
+    // =======================================================
+    m_topColorImage.release();
+    m_topAlignedDepthImage.release();
+    
     // 将所有复选框置为 false
     for(auto* chk : m_layerChecks) {
-        // 暂时断开信号，防止触发 onLayerToggle 报错
         chk->blockSignals(true);
         chk->setChecked(false);
         chk->blockSignals(false);
     }
 }
+
 
 
 // 辅助函数：后续算法调用时，不能直接 edit->text()，因为那只是文件名
@@ -1220,10 +1253,51 @@ void SingleModePage::loadCloudToMemory(const QString& key, const QString& filePa
 
     // [核心修改] 拦截扩展名分支
     if (filePath.endsWith(".raw", Qt::CaseInsensitive)) {
-        // 使用内参引擎解析 .raw
-        cloud = PointCloudAlgo::convertRawDepthToPointCloud(filePath, m_intrinsicsMap[key]);
+        CameraIntrinsics intr = PointCloudAlgo::getCameraIntrinsics(key, SensorType::DEPTH, 512, 512);
+        cloud = PointCloudAlgo::convertRawDepthToPointCloud(filePath, intr);
+
+        // =======================================================
+        // [新增] 如果是 Top 视角，顺便加载彩色图和对齐深度图
+        // =======================================================
+        if (key == "Top") {
+            // 推导彩色图路径
+            QString colorPath = filePath;
+            colorPath.replace("_depth_raw.raw", "_rgb.png"); 
+            
+            // 加载彩色图
+            m_topColorImage = cv::imread(colorPath.toStdString(), cv::IMREAD_COLOR);
+            
+            // 推导对齐深度图路径
+            QString alignedDepthPath = filePath;
+            alignedDepthPath.replace("_depth_raw.raw", "_depth_aligned.raw"); 
+
+            // 加载 1280x720 的 16-bit 对齐深度图
+            bool depthLoaded = false;
+            QFile dFile(alignedDepthPath);
+            if (dFile.open(QIODevice::ReadOnly)) {
+                QByteArray dData = dFile.readAll();
+                if (dData.size() == 1280 * 720 * 2) {
+                    m_topAlignedDepthImage = cv::Mat(720, 1280, CV_16UC1, dData.data()).clone(); 
+                    depthLoaded = true;
+                }
+                dFile.close();
+            }
+
+            // [核心修复] 极其严谨的状态校验日志
+            if (!m_topColorImage.empty() && depthLoaded) {
+                log("✅ 成功将 Top 视角 RGB 图像及对齐深度图装载入内存。", "SUCCESS");
+            } else {
+                if (m_topColorImage.empty()) {
+                    log("❌ 警告：无法读取 Top 彩色图像！尝试路径: " + colorPath, "WARN");
+                }
+                if (!depthLoaded) {
+                    log("❌ 警告：无法读取对齐深度图或分辨率不是 1280x720！尝试路径: " + alignedDepthPath, "WARN");
+                }
+            }
+        }
+
         if (!cloud || cloud->empty()) {
-            log("RAW 深度图转换失败！请检查文件完整性或确认内参分辨率(默认1024x1024)。", "ERROR");
+            log("RAW 深度图转换失败！请检查文件完整性或确认内参分辨率(默认1280x720)。", "ERROR");
             QMessageBox::warning(this, "加载失败", "RAW 深度图解析失败，请检查内参分辨率。");
             return;
         }
@@ -1444,34 +1518,35 @@ void SingleModePage::initDefaultMatrices() {
     // 根据你的 pc_register.cpp 中的数据硬编码默认值
     // LB -> Top
     Eigen::Matrix4d lb;
-    lb << 0.998144, 0.040452, 0.045531, 43.625172,
-          0.049100, -0.092113, -0.994537, 1393.481567,
-          -0.036037, 0.994927, -0.093928, 2062.417725,
-          0, 0, 0, 1;
+    lb << 
+        -0.925691, -0.050326, -0.374918, 727.440735,
+        -0.369875, -0.087362, 0.924965, -1535.817993,
+        -0.079304, 0.994905, 0.062256, 1811.115601,
+        0.000000, 0.000000, 0.000000, 1.000000;
     m_transforms["LB"] = lb;
 
     // LT -> Top
     Eigen::Matrix4d lt;
-    lt << 0.991525, 0.015493, 0.128988, -49.530918,
-          0.125268, 0.149176, -0.980844, 1446.867676,
-          -0.034438, 0.988689, 0.145971, 1454.759033,
-          0, 0, 0, 1;
+    lt << -0.893402, 0.129827, -0.430091, 715.208496,
+-0.431722, -0.512967, 0.741944, -1244.757813,
+-0.124298, 0.848534, 0.514334, 853.710327,
+0.000000, 0.000000, 0.000000, 1.000000;
     m_transforms["LT"] = lt;
 
     // RB -> Top
     Eigen::Matrix4d rb;
-    rb << -0.997376, 0.071718, 0.009833, 9.360316,
-          0.006674, -0.044152, 0.999003, -1420.248047,
-          0.072081, 0.996447, 0.043558, 1944.664185,
-          0, 0, 0, 1;
+    rb << 0.843684, 0.019195, 0.536497, -845.013184,
+0.527601, -0.214250, -0.822030, 1084.744995,
+0.099166, 0.976590, -0.190886, 2075.820557,
+0.000000, 0.000000, 0.000000, 1.000000;
     m_transforms["RB"] = rb;
 
     // RT -> Top
     Eigen::Matrix4d rt;
-    rt << -0.993564, 0.102217, 0.048803, 11.873594,
-          0.016009, -0.299805, 0.953866, -1409.841309,
-          0.112133, 0.948509, 0.296239, 1245.285522,
-          0, 0, 0, 1;
+    rt << 0.881307, -0.310379, 0.356319, -767.480042,
+0.451075, 0.327860, -0.830084, 1185.616089,
+0.140818, 0.892285, 0.428950, 1194.222656,
+0.000000, 0.000000, 0.000000, 1.000000;
     m_transforms["RT"] = rt;
 }
 
@@ -1855,7 +1930,7 @@ void SingleModePage::onRunAIInference() {
     multiPart->setParent(reply); // 随 reply 一起自动销毁，防止内存泄漏
 
     // [可选] 禁用按钮防止重复点击
-    m_btnRunAI->setEnabled(false); m_btnRunAI->setText("推理中...");
+    m_btnRunAI3D->setEnabled(false); m_btnRunAI3D->setText("3D 推理中...");
 
     // ==========================================================
     // 6. 异步处理返回结果 (C++11 Lambda 回调)
@@ -1929,9 +2004,9 @@ void SingleModePage::onRunAIInference() {
         reply->deleteLater(); // 释放内存
         
         // 恢复 AI 按钮状态（如果你采用了成员变量 m_btnRunAI）
-        if (m_btnRunAI) {
-            m_btnRunAI->setEnabled(true); 
-            m_btnRunAI->setText("⚡ 运行模型推理");
+        if (m_btnRunAI3D) {
+            m_btnRunAI3D->setEnabled(true); 
+            m_btnRunAI3D->setText("☁️ 运行 3D 点云推理 (服务端)");
         }
     });
 }
@@ -2458,4 +2533,129 @@ void SingleModePage::onSetIntrinsics() {
     });
 
     dlg.exec();
+}
+
+
+void SingleModePage::onRunAIInference2D() {
+    prepareKeypointsCloud(); 
+    if (m_topColorImage.empty() || m_topAlignedDepthImage.empty()) {
+        QMessageBox::warning(this, "错误", "缺少 Top 相机的彩色图或对齐深度图！");
+        return;
+    }
+
+    QString modelPath = m_leModelPath->text();
+    QString initMsg; 
+    if (!m_openpose.initModel(modelPath, initMsg)) {
+        log(QString("ONNX 加载失败: %1").arg(initMsg), "ERROR"); return;
+    }
+
+    log("正在执行本地 2D 图像深度学习推理...", "ALGO");
+    
+    // 1. 接收带有置信度的 3D 向量 (x, y, 置信度)
+    std::vector<cv::Point3f> kps2d_with_conf = m_openpose.predict(m_topColorImage);
+    this->m_keypoints.clear();
+    
+    // 获取相机内外参
+    CameraIntrinsics colorIntr = PointCloudAlgo::getCameraIntrinsics("Top", SensorType::COLOR, 1280, 720);
+    CameraDeviceParams params = PointCloudAlgo::getCameraParams("Top");
+
+    Eigen::Matrix3f R;
+    R << params.extrinsics.R[0], params.extrinsics.R[1], params.extrinsics.R[2],
+         params.extrinsics.R[3], params.extrinsics.R[4], params.extrinsics.R[5],
+         params.extrinsics.R[6], params.extrinsics.R[7], params.extrinsics.R[8];
+    Eigen::Vector3f T(params.extrinsics.T[0], params.extrinsics.T[1], params.extrinsics.T[2]);
+
+    // 准备 OpenCV 矩阵用于去畸变运算
+    cv::Mat camMat = (cv::Mat_<double>(3, 3) << colorIntr.fx, 0, colorIntr.cx, 0, colorIntr.fy, colorIntr.cy, 0, 0, 1);
+    cv::Mat distCoeffs = (cv::Mat_<double>(1, 8) << colorIntr.k1, colorIntr.k2, colorIntr.p1, colorIntr.p2, colorIntr.k3, colorIntr.k4, colorIntr.k5, colorIntr.k6);
+
+    // 克隆一张图用于弹窗可视化
+    cv::Mat vizImage = m_topColorImage.clone();
+
+    int validCount = 0;
+    for (int i = 0; i < kps2d_with_conf.size(); ++i) {
+        float u = kps2d_with_conf[i].x;
+        float v = kps2d_with_conf[i].y;
+        float conf = kps2d_with_conf[i].z; // 提取热力值
+        
+        // 【新增 1】将热力值打印到 UI 左下角的自定义日志框中
+        log(QString("P%1 置信度: %2").arg(i+1).arg(conf, 0, 'f', 4), "INFO");
+
+        if (u < 0 || v < 0 || conf < 0.1) { 
+            log(QString("P%1 关键点未有效检测到！(置信度: %2)").arg(i+1).arg(conf, 0, 'f', 4), "WARN");
+            continue;
+        }
+
+        // 画 2D 点到可视化图上
+        cv::circle(vizImage, cv::Point(u, v), 8, cv::Scalar(0, 0, 255), -1);
+        cv::putText(vizImage, "P" + std::to_string(i+1), cv::Point(u + 10, v), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+
+        // 深度补洞逻辑 (不变)
+        int ui = cvRound(u), vi = cvRound(v);
+        uint16_t z_raw = m_topAlignedDepthImage.at<uint16_t>(vi, ui);
+        if (z_raw == 0) {
+            int r = 3; float sum = 0; int cnt = 0;
+            for(int dy = -r; dy <= r; ++dy) {
+                for(int dx = -r; dx <= r; ++dx) {
+                    int ny = vi + dy, nx = ui + dx;
+                    if(nx >= 0 && nx < 1280 && ny >= 0 && ny < 720) {
+                        uint16_t val = m_topAlignedDepthImage.at<uint16_t>(ny, nx);
+                        if(val > 0) { sum += val; cnt++; }
+                    }
+                }
+            }
+            if(cnt > 0) z_raw = sum / cnt; 
+        }
+
+        if (z_raw == 0) continue;
+
+        // =======================================================
+        // 【新增 2：核心数学修复】对 2D 坐标进行 OpenCV 物理去畸变
+        // =======================================================
+        std::vector<cv::Point2f> srcPts = {cv::Point2f(u, v)};
+        std::vector<cv::Point2f> dstPts;
+        // undistortPoints 会直接输出“归一化”的理想坐标 (x/Z, y/Z)
+        cv::undistortPoints(srcPts, dstPts, camMat, distCoeffs); 
+
+        float z_c = static_cast<float>(z_raw); 
+        // 直接乘以深度，得到 Color 相机坐标系下的完美 3D 坐标
+        float x_c = dstPts[0].x * z_c;
+        float y_c = dstPts[0].y * z_c;
+
+        Eigen::Vector3f P_color(x_c, y_c, z_c);
+        
+        // 逆变换回 Depth 点云坐标系
+        Eigen::Vector3f P_depth = R.transpose() * (P_color - T);
+        
+        this->m_keypoints.push_back(P_depth);
+        validCount++;
+
+        // 【新增需求】：在控制台中漂亮地输出该点的 2D 像素坐标、3D 空间坐标以及置信度
+        log(QString("P%1 [2D] 像素: (%2, %3) | [3D] 毫米: (X:%4, Y:%5, Z:%6) | 置信度: %7")
+            .arg(i+1)
+            .arg(u, 0, 'f', 1).arg(v, 0, 'f', 1)
+            .arg(P_depth.x(), 0, 'f', 1).arg(P_depth.y(), 0, 'f', 1).arg(P_depth.z(), 0, 'f', 1)
+            .arg(conf, 0, 'f', 4), "INFO");
+    }
+
+    // 【新增 3】弹出带有检测结果的 OpenCV 图片窗口
+    cv::namedWindow("2D AI Detection Result", cv::WINDOW_NORMAL);
+    cv::resizeWindow("2D AI Detection Result", 1280, 720);
+    cv::imshow("2D AI Detection Result", vizImage);
+
+    // 更新 UI 状态
+    if (validCount == 6) {
+        log("🎉 AI 关键点检测完成，经过物理去畸变与外参映射，已贴合至点云！", "SUCCESS");
+        this->drawKeypointsInViewer(this->m_keypoints);
+        for (int i = 0; i < m_kpBadges.size(); ++i) updateBadgeStyle(i, 2);
+        
+        // 【新增 4】强制点亮融合点云/主体点云的图层复选框，让底图显示出来
+        if (m_layerChecks.contains("Body")) {
+            m_layerChecks["Body"]->setChecked(true); // 激活主体猪图层
+        } else if (m_layerChecks.contains("Merged")) {
+            m_layerChecks["Merged"]->setChecked(true); // 退而求其次激活融合图层
+        }
+    } else {
+        log("模型未能完整检测 6 个点，请检查图像质量或转入手动模式。", "WARN");
+    }
 }
