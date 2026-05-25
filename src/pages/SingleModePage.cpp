@@ -794,49 +794,156 @@ void SingleModePage::initRightPanel() {
     // =================================================
     // 3. 主体精细提取 (Extraction)
     // =================================================
-    auto *box3 = new CollapsibleBox("3. 主体精细提取 (Extraction)");
-    auto *lay3 = new QVBoxLayout();
-    lay3->setSpacing(8);
-    
-    // 1. 地面滤除阈值 (RANSAC)
-    auto *rowRansac = new QHBoxLayout();
-    rowRansac->addWidget(new QLabel("地面滤除厚度:"));
-    m_spinRansacThresh = new QDoubleSpinBox();
-    m_spinRansacThresh->setRange(1.0, 100.0);
-    m_spinRansacThresh->setValue(20.0); // 默认将 15mm 厚度的底层视为地面
-    m_spinRansacThresh->setSuffix(" mm");
-    m_spinRansacThresh->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
-    rowRansac->addWidget(m_spinRansacThresh);
-    lay3->addLayout(rowRansac);
+    QWidget *extWidget = new QWidget();
+    QVBoxLayout *lay3 = new QVBoxLayout(extWidget);
 
-    // 2. 聚类容差
-    auto *rowTol = new QHBoxLayout();
-    rowTol->addWidget(new QLabel("聚类容差 (Tol):"));
-    m_spinExtractTol = new QDoubleSpinBox();
-    m_spinExtractTol->setRange(5.0, 200.0); 
-    m_spinExtractTol->setValue(40.0); // 默认 50mm，足够跨越猪身上的小缝隙
-    m_spinExtractTol->setSuffix(" mm");
-    m_spinExtractTol->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
-    rowTol->addWidget(m_spinExtractTol);
-    lay3->addLayout(rowTol);
+    // 3.1 共用参数：CropBox 包围盒 (使用网格布局更紧凑)
+    QGroupBox *boxGroup = new QGroupBox("1. 空间裁剪范围 (CropBox X/Y/Z)");
+    QGridLayout *boxLay = new QGridLayout(boxGroup);
     
-    // 3. 最小点数
-    auto *rowMinSize = new QHBoxLayout();
-    rowMinSize->addWidget(new QLabel("最小簇点数:"));
-    m_spinExtractMinSize = new QSpinBox(); 
-    m_spinExtractMinSize->setRange(1, 1000000); 
-    m_spinExtractMinSize->setValue(5000); // 猪体很大，设为 5000 可以过滤掉设备架子等中型噪点
-    m_spinExtractMinSize->setStyleSheet("background: #fff; border: 1px solid #dcdfe6; padding: 2px;");
-    rowMinSize->addWidget(m_spinExtractMinSize);
-    lay3->addLayout(rowMinSize);
+    auto makeBoxSpin = [](double min, double max, double val) {
+        QDoubleSpinBox* s = new QDoubleSpinBox();
+        s->setRange(min, max); s->setValue(val); s->setDecimals(0);
+        s->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+        return s;
+    };
+    m_spinBoxMinX = makeBoxSpin(-3000, 3000, -1200);
+    m_spinBoxMinY = makeBoxSpin(-3000, 3000, -460);
+    m_spinBoxMinZ = makeBoxSpin(-3000, 3000, -500);
+    m_spinBoxMaxX = makeBoxSpin(-3000, 3000, 600);
+    m_spinBoxMaxY = makeBoxSpin(-3000, 3000, 170);
+    m_spinBoxMaxZ = makeBoxSpin(-3000, 3000, 2100);
+
+    boxLay->addWidget(new QLabel("Min:"), 0, 0);
+    boxLay->addWidget(m_spinBoxMinX, 0, 1); boxLay->addWidget(m_spinBoxMinY, 0, 2); boxLay->addWidget(m_spinBoxMinZ, 0, 3);
+    boxLay->addWidget(new QLabel("Max:"), 1, 0);
+    boxLay->addWidget(m_spinBoxMaxX, 1, 1); boxLay->addWidget(m_spinBoxMaxY, 1, 2); boxLay->addWidget(m_spinBoxMaxZ, 1, 3);
+
+    // [新增] Z 轴旋转角度的 UI 配置
+    m_spinBoxRotZ = new QDoubleSpinBox();
+    m_spinBoxRotZ->setRange(-180.0, 180.0);
+    m_spinBoxRotZ->setValue(33.0);
+    m_spinBoxRotZ->setDecimals(1);
+    m_spinBoxRotZ->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    boxLay->addWidget(new QLabel("Z轴旋转(度):"), 2, 0);
+    boxLay->addWidget(m_spinBoxRotZ, 2, 1); // 放在第二行第一列
+
+    lay3->addWidget(boxGroup);
+
+    // 3.2 共用参数：最小聚类点数
+    auto *rowMinPts = new QHBoxLayout();
+    rowMinPts->addWidget(new QLabel("最小连续点数:"));
+    m_spinExtMinPts = new QSpinBox(); m_spinExtMinPts->setRange(100, 100000); m_spinExtMinPts->setValue(5000);
+    m_spinExtMinPts->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    rowMinPts->addWidget(m_spinExtMinPts);
+    lay3->addLayout(rowMinPts);
+
+    // 3.3 聚类算法选择
+    auto *rowExtAlgo = new QHBoxLayout();
+    rowExtAlgo->addWidget(new QLabel("2. 主体聚类算法:"));
+    m_comboExtMethod = new QComboBox();
+    m_comboExtMethod->addItems({"欧式聚类 (距离连通)", "区域生长 (曲面平滑度)"});
+    rowExtAlgo->addWidget(m_comboExtMethod);
+    lay3->addLayout(rowExtAlgo);
+
+    // 3.4 动态参数面板：欧式聚类
+    m_euclideanParamsWidget = new QWidget();
+    QFormLayout *eLay = new QFormLayout(m_euclideanParamsWidget);
+    eLay->setContentsMargins(15, 0, 0, 0);
+    m_spinEuclideanTol = new QDoubleSpinBox(); m_spinEuclideanTol->setRange(1.0, 200.0); m_spinEuclideanTol->setValue(40.0);
+    m_spinEuclideanTol->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    eLay->addRow("聚类搜索容差(mm):", m_spinEuclideanTol);
+    lay3->addWidget(m_euclideanParamsWidget);
+
+    // 3.5 动态参数面板：区域生长
+    m_rgParamsWidget = new QWidget();
+    QFormLayout *rgLay = new QFormLayout(m_rgParamsWidget);
+    rgLay->setContentsMargins(15, 0, 0, 0);
+    m_spinRgNeighbors = new QSpinBox(); m_spinRgNeighbors->setRange(5, 100); m_spinRgNeighbors->setValue(30);
+    m_spinRgNeighbors->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    m_spinRgSmoothness = new QDoubleSpinBox(); m_spinRgSmoothness->setRange(1.0, 45.0); m_spinRgSmoothness->setValue(7.0);
+    m_spinRgSmoothness->setStyleSheet("background: #fff; border: 1px solid #dcdfe6;");
+    rgLay->addRow("法线搜索邻居数:", m_spinRgNeighbors);
+    rgLay->addRow("平滑度阈值(度):", m_spinRgSmoothness);
+    lay3->addWidget(m_rgParamsWidget);
+
+    // 初始状态与信号槽联动
+    m_rgParamsWidget->setVisible(false); // 默认显示欧式聚类
+    connect(m_comboExtMethod, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index){
+        m_euclideanParamsWidget->setVisible(index == 0); 
+        m_rgParamsWidget->setVisible(index == 1);               
+    });
+
+    // [新增] 3.4 RANSAC 平面剔除配置
+    QFrame *ransacFrame = new QFrame();
+    ransacFrame->setStyleSheet("background: #fdf6ec; border: 1px solid #faecd8; border-radius: 4px; margin-top: 5px;");
+    QHBoxLayout *ransacLay = new QHBoxLayout(ransacFrame);
+    
+    m_chkUseRansac = new QCheckBox("开启 RANSAC 平面剔除");
+    m_chkUseRansac->setToolTip("在聚类后尝试寻找并移除点云中的最大平面（通常用于清理残留地面）");
+    
+    m_spinRansacDist = new QDoubleSpinBox();
+    m_spinRansacDist->setRange(1.0, 100.0);
+    m_spinRansacDist->setValue(30.0);
+    m_spinRansacDist->setSuffix(" mm");
+    m_spinRansacDist->setEnabled(false); // 初始禁用
+
+    ransacLay->addWidget(m_chkUseRansac);
+    ransacLay->addWidget(new QLabel("阈值:"));
+    ransacLay->addWidget(m_spinRansacDist);
+    
+    lay3->addWidget(ransacFrame);
+
+    // 联动逻辑：只有勾选了开启，才能调节阈值
+    connect(m_chkUseRansac, &QCheckBox::toggled, m_spinRansacDist, &QDoubleSpinBox::setEnabled);
+
+
+    // 假设你有一个表单布局: QFormLayout* paramLayout;
+
+    // 1. 开启上采样的复选框
+    cbMlsUpsampling = new QCheckBox("开启 MLS 上采样补洞", this);
+    cbMlsUpsampling->setChecked(true);
+
+    // 2. MLS 搜索半径 (注意：这里千万不能漏掉 = new QDoubleSpinBox(this))
+    spinMlsRadius = new QDoubleSpinBox(this);
+    spinMlsRadius->setRange(10.0, 100.0);
+    spinMlsRadius->setSingleStep(5.0);
+    spinMlsRadius->setValue(80.0);
+    spinMlsRadius->setSuffix(" mm");
+
+    // 3. 上采样半径
+    spinUpsampleRadius = new QDoubleSpinBox(this);
+    spinUpsampleRadius->setRange(5.0, 100.0);
+    spinUpsampleRadius->setSingleStep(5.0);
+    spinUpsampleRadius->setValue(25.0);
+    spinUpsampleRadius->setSuffix(" mm");
+
+    // 4. 上采样步长
+    spinUpsampleStep = new QDoubleSpinBox(this);
+    spinUpsampleStep->setRange(1.0, 50.0);
+    spinUpsampleStep->setSingleStep(1.0);
+    spinUpsampleStep->setValue(25.0);
+    spinUpsampleStep->setSuffix(" mm");
+
+    // 5. 独立布局并加入总布局
+    QFormLayout* mlsLay = new QFormLayout();
+    mlsLay->setContentsMargins(5, 10, 0, 0); 
+    mlsLay->addRow(new QLabel("<b>--- MLS 平滑与补孔 ---</b>"));
+    mlsLay->addRow(cbMlsUpsampling);
+    mlsLay->addRow("MLS 搜索半径:", spinMlsRadius);
+    mlsLay->addRow("补孔半径:", spinUpsampleRadius);
+    mlsLay->addRow("生成点步长:", spinUpsampleStep);
+
+    // 将整个 MLS 布局添加到提取模块的总垂直布局 lay3 中
+    lay3->addLayout(mlsLay);
 
     // 提取按钮
-    QPushButton *btnExtract = new QPushButton("🐷 提取平滑最大主体");
+    QPushButton* btnExtract = new QPushButton("🐷 提取平滑最大主体");
     btnExtract->setObjectName("PrimaryBtn");
     lay3->addWidget(btnExtract);
     connect(btnExtract, &QPushButton::clicked, this, &SingleModePage::onExtractBody);
 
-
+    auto *box3 = new CollapsibleBox("3. 主体精细提取 (Extraction)");
     box3->setContentLayout(lay3);
     scrollLayout->addWidget(box3);
 
@@ -1519,9 +1626,9 @@ void SingleModePage::initDefaultMatrices() {
     // LB -> Top
     Eigen::Matrix4d lb;
     lb << 
-        -0.925691, -0.050326, -0.374918, 727.440735,
-        -0.369875, -0.087362, 0.924965, -1535.817993,
-        -0.079304, 0.994905, 0.062256, 1811.115601,
+        -0.926086, -0.052355, -0.373662, 719.549438,
+        -0.368365, -0.088922, 0.925419, -1532.871094,
+        -0.081677, 0.994662, 0.063064, 1826.347290,
         0.000000, 0.000000, 0.000000, 1.000000;
     m_transforms["LB"] = lb;
 
@@ -1784,46 +1891,71 @@ void SingleModePage::getCameraColor(const QString& camName, int& r, int& g, int&
 
 // 实现主体精细提取的槽函数
 void SingleModePage::onExtractBody() {
-    // 1. 检查是否存在融合后的点云数据
     if (!m_cloudData.contains("Merged") || m_cloudData["Merged"]->empty()) {
-        QMessageBox::warning(this, "警告", "没有找到融合后的点云！请先执行配准与融合。");
+        QMessageBox::warning(this, "警告", "没有可用的融合点云！请先执行配准与融合。");
         return;
     }
 
-    // 2. 读取界面参数
-    double plane_thresh = m_spinRansacThresh->value();  // 平面检测阈值
-    double tol = m_spinExtractTol->value();             // 聚类提取的距离容差
-    int min_size = m_spinExtractMinSize->value();       // 聚类提取的最小点数
+    log("开始提取主体并进行平滑处理...", "ALGO");
 
-    // 包装日志回调
-    auto logBridge = [this](const QString& msg, const QString& type) {
-        this->log(msg, type); 
+    // 组装所有 UI 参数
+    ExtractionParams params;
+    params.boxMinX = m_spinBoxMinX->value();
+    params.boxMinY = m_spinBoxMinY->value();
+    params.boxMinZ = m_spinBoxMinZ->value();
+    params.boxMaxX = m_spinBoxMaxX->value();
+    params.boxMaxY = m_spinBoxMaxY->value();
+    params.boxMaxZ = m_spinBoxMaxZ->value();
+    params.boxRotZ = m_spinBoxRotZ->value();
+    params.minClusterSize = m_spinExtMinPts->value();
+
+    params.methodIndex = m_comboExtMethod->currentIndex();
+    params.euclideanTolerance = m_spinEuclideanTol->value();
+    params.rgNeighbors = m_spinRgNeighbors->value();
+    params.rgSmoothness = m_spinRgSmoothness->value();
+
+    // [新增] 收集 RANSAC 参数
+    params.useRansac = m_chkUseRansac->isChecked();
+    params.ransacDistThresh = m_spinRansacDist->value();
+
+    params.useMlsUpsampling = cbMlsUpsampling->isChecked();
+    params.mlsSearchRadius = spinMlsRadius->value();
+    params.mlsUpsamplingRadius = spinUpsampleRadius->value();
+    params.mlsUpsamplingStep = spinUpsampleStep->value();
+
+    auto logBridge = [this](const QString& msg, const QString& level) {
+        // 使用 QMetaObject::invokeMethod 保证跨线程 UI 调用的安全性
+        QMetaObject::invokeMethod(this, [this, msg, level]() {
+            this->log(msg, level);
+        });
     };
 
-    // 3. 执行算法，提取主体
-    PointCloudT::Ptr bodyCloud = PointCloudAlgo::extractLargestCluster(
-        m_cloudData["Merged"], tol, min_size, plane_thresh, logBridge
-    );
+    // 如果为了防止界面卡顿，你可以把这一步也放到 QtConcurrent::run 中
+    // 这里为了简便和配准逻辑统一，直接在主线程/或使用异步调用
+    PointCloudT::Ptr body_cloud = PointCloudAlgo::extractLargestCluster(m_cloudData["Merged"], params, logBridge);
 
-    // 4. 更新内存与 3D 视图
-    if (bodyCloud) {
-        // 保存到内存字典
-        m_cloudData["Body"] = bodyCloud;
-
-        // 【视觉优化】: 关闭“融合点云”图层，打开“提取主体”图层
-        // 这样画面中杂乱的背景会瞬间消失，只剩下粉色的干干净净的猪体
-        if (m_layerChecks.contains("Merged")) {
-            m_layerChecks["Merged"]->setChecked(false); // 触发 onLayerToggle 隐藏
-        }
+    if (body_cloud && !body_cloud->empty()) {
+        m_cloudData["Body"] = body_cloud;
         
         if (m_layerChecks.contains("Body")) {
-            m_layerChecks["Body"]->setChecked(true); // 触发 onLayerToggle 显示粉色
-            
-            // 手动调用一次确保视图刷新
+            m_layerChecks["Body"]->setChecked(true);
             onLayerToggle("Body", true);
         }
+        
+        m_viewer->removePointCloud("Merged");
+        if (m_layerChecks.contains("Merged")) {
+            m_layerChecks["Merged"]->setChecked(false);
+            onLayerToggle("Merged", false);
+        }
+        
+        update3DView();
+        log(QString("主体提取成功！最终平滑点云点数：%1").arg(body_cloud->size()), "SUCCESS");
+    } else {
+        log("主体提取失败。", "ERROR");
+        QMessageBox::warning(this, "错误", "主体提取失败，调整参数后再试。");
     }
 }
+
 
 
 // 在 PCL 视图中绘制关键点的辅助函数
@@ -2073,17 +2205,27 @@ bool SingleModePage::prepareKeypointsCloud() {
 
     log("开始准备关键点检测云 (提取背部点云)...", "ALGO");
     
-    // 参数设置
-    double plane_thresh = 15.0; 
-    double tol = 50.0;          
-    int min_size = 1000;        
+    // =======================================================
+    // [核心修改] 组装提取参数 (利用 UI 包围盒 + 强制欧式聚类)
+    // =======================================================
+    ExtractionParams params;
+    // 直接抓取用户在右侧 UI 面板设置的裁剪包围盒
+    params.boxMinX = m_spinBoxMinX->value();
+    params.boxMinY = m_spinBoxMinY->value();
+    params.boxMinZ = m_spinBoxMinZ->value();
+    params.boxMaxX = m_spinBoxMaxX->value();
+    params.boxMaxY = m_spinBoxMaxY->value();
+    params.boxMaxZ = m_spinBoxMaxZ->value();
+    
+    // 针对背部顶层提取，设置较小的簇限制和较大的容差
+    params.minClusterSize = 1000;
+    params.methodIndex = 0; // 强制使用欧式聚类 (速度最快，适合粗提)
+    params.euclideanTolerance = 50.0;
 
     auto logBridge = [this](const QString& msg, const QString& type) { this->log(msg, type); };
     
-    // 调用算法提取
-    PointCloudT::Ptr backCloud = PointCloudAlgo::extractLargestCluster(
-        m_cloudData["Top"], tol, min_size, plane_thresh, logBridge
-    );
+    // 调用最新的算法 API
+    PointCloudT::Ptr backCloud = PointCloudAlgo::extractLargestCluster(m_cloudData["Top"], params, logBridge);
 
     if (!backCloud) {
         log("背部点云提取失败，无法进行标注！", "ERROR");
@@ -2094,6 +2236,7 @@ bool SingleModePage::prepareKeypointsCloud() {
     m_cloudData["Keypoints"] = backCloud;
     return true;
 }
+
 
 
 // ---------------------------------------------------------
@@ -2657,5 +2800,14 @@ void SingleModePage::onRunAIInference2D() {
         }
     } else {
         log("模型未能完整检测 6 个点，请检查图像质量或转入手动模式。", "WARN");
+    }
+}
+
+
+
+// 辅助函数：刷新 3D 视图
+void SingleModePage::update3DView() {
+    if (m_viewer) {
+        m_viewer->getRenderWindow()->Render();
     }
 }

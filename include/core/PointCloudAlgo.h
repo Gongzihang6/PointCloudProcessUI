@@ -20,6 +20,8 @@
 #include <pcl/common/common.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
 #include <pcl/registration/ndt.h>
+#include <pcl/filters/crop_box.h>
+#include <pcl/segmentation/region_growing.h>
 #include <algorithm>
 #include <cmath>
 
@@ -100,6 +102,44 @@ struct PolarPoint {
 };
 
 
+// [新增] 主体提取参数结构体
+struct ExtractionParams {
+    // 1. 共用参数：包围盒 (CropBox)
+    float boxMinX = -1200.0f, boxMinY = -460.0f, boxMinZ = -500.0f;
+    float boxMaxX = 600.0f,  boxMaxY = 170.0f,  boxMaxZ = 2100.0f;
+    int minClusterSize = 5000;
+
+    // 2. 算法选择 (0: 欧式聚类, 1: 区域生长)
+    int methodIndex = 0; 
+
+    // 3. 欧式聚类专属参数
+    double euclideanTolerance = 40.0; // mm
+
+    // 4. 区域生长专属参数
+    int rgNeighbors = 30;
+    double rgSmoothness = 7.0; // 角度 (度)
+    double rgCurvature = 1.0;
+
+    // [新增] 包围盒绕 Z 轴的旋转角度 (度)
+    float boxRotZ = 33.0f;
+
+    // ==========================================
+    // [新增] RANSAC 平面剔除参数
+    // ==========================================
+    bool useRansac = true;         // 是否开启二次平面剔除
+    double ransacDistThresh = 30.0; // RANSAC 距离阈值 (mm)
+
+    double ransacAngleThresh = 10.0;
+
+    // ==========================================
+    // [新增] MLS 平滑与上采样参数
+    // ==========================================
+    bool useMlsUpsampling = true;         // 是否开启上采样补孔
+    double mlsSearchRadius = 80.0;        // MLS 搜索半径 (决定平滑和跨越孔洞的范围)
+    double mlsUpsamplingRadius = 25.0;    // 补孔半径 (建议略小于搜索半径)
+    double mlsUpsamplingStep = 25.0;      // 补孔生成点步长 (越小点越密)
+};
+
 class PointCloudAlgo {
 public:
     // 定义枚举，让代码更具可读性
@@ -166,11 +206,9 @@ public:
     // 6. 提取最大连通主体 (欧式聚类)
     static PointCloudT::Ptr extractLargestCluster(
         PointCloudT::Ptr input_cloud, 
-        double tolerance,       // 聚类容差 (mm)
-        int min_cluster_size,   // 最小簇点个数
-        double plane_thresh,    // RANSAC 平面厚度阈值 (mm)
-        std::function<void(const QString&, const QString&)> logger = nullptr
-    );
+        const ExtractionParams& params,
+        std::function<void(const QString&, const QString&)> logger = nullptr);
+
 
     // 整合的体尺计算主干函数
     static BodySizeResults calculateAllMeasurements(
@@ -192,6 +230,14 @@ public:
     static CameraDeviceParams getCameraParams(const QString& camKey);
     // [新增] 便捷函数：直接获取特定类型、特定分辨率下的内参
     static CameraIntrinsics getCameraIntrinsics(const QString& camKey, SensorType type, int width, int height);
+
+    template<typename PointT>
+    static typename pcl::PointCloud<PointT>::Ptr applyTaubinSmoothing(
+        const typename pcl::PointCloud<PointT>::ConstPtr& cloud_in,
+        int num_iterations,
+        double lambda,
+        double mu,
+        int k_neighbors=20);
 
 private:
     // 内部辅助函数：将点云转换为带法线的点云 (用于点到面 ICP)

@@ -73,6 +73,11 @@ void BatchModePage::initUI() {
 
     ioLay->addWidget(new QLabel("输入目录:"), 0, 0); ioLay->addWidget(m_leInput, 0, 1); ioLay->addWidget(btnInput, 0, 2);
     ioLay->addWidget(new QLabel("输出目录:"), 1, 0); ioLay->addWidget(m_leOutput, 1, 1); ioLay->addWidget(btnOutput, 1, 2);
+    // [新增功能] 仅提取模式开关
+    m_chkOnlyExtract = new QCheckBox("⚡ 仅批量提取主体与融合 (跳过后续 AI 关键点与体尺测量)");
+    m_chkOnlyExtract->setStyleSheet("font-weight: bold; color: #E6A23C; margin-top: 5px;");
+    ioLay->addWidget(m_chkOnlyExtract, 2, 0, 1, 3); // 放在第 2 行
+
 
     m_btnStart = new QPushButton("🚀 开始批量处理");
     m_btnStart->setMinimumHeight(40);
@@ -90,7 +95,7 @@ void BatchModePage::initUI() {
     QHBoxLayout *btnLay = new QHBoxLayout();
     btnLay->addWidget(m_btnStart);
     btnLay->addWidget(m_btnStop);
-    ioLay->addLayout(btnLay, 2, 0, 1, 3);
+    ioLay->addLayout(btnLay, 3, 0, 1, 3);
     mainLayout->addWidget(grpIO, 0);
 
     // --- 2. 中间全局参数配置区 (放入滚动区) ---
@@ -136,6 +141,22 @@ void BatchModePage::initUI() {
     regLay->addWidget(m_spinNdtIter, 5, 1);
     // =========================================================
 
+    // =========================================================
+    // [核心修复] 实例化缺失的 G-ICP 控件，终结闪退！
+    // =========================================================
+    m_spinGicpIter = new QSpinBox(); 
+    m_spinGicpIter->setValue(50); 
+    m_spinGicpIter->setMaximum(500); 
+    regLay->addWidget(new QLabel("G-ICP 迭代次数:"), 6, 0); 
+    regLay->addWidget(m_spinGicpIter, 6, 1);
+
+    m_spinGicpDist = new QDoubleSpinBox(); 
+    m_spinGicpDist->setValue(50.0); 
+    m_spinGicpDist->setMaximum(1000.0); 
+    regLay->addWidget(new QLabel("G-ICP 对应距离:"), 7, 0); 
+    regLay->addWidget(m_spinGicpDist, 7, 1);
+    // =========================================================
+
     colA->addWidget(grpReg);
     paramLayout->addLayout(colA);
 
@@ -143,10 +164,77 @@ void BatchModePage::initUI() {
     QVBoxLayout *colB = new QVBoxLayout();
     QGroupBox *grpExt = new QGroupBox("3. 提取参数");
     QGridLayout *extLay = new QGridLayout(grpExt);
-    m_spinRansac = new QDoubleSpinBox(); m_spinRansac->setValue(20.0); extLay->addWidget(new QLabel("地面滤除厚度:"), 0,0); extLay->addWidget(m_spinRansac, 0,1);
-    m_spinTol = new QDoubleSpinBox(); m_spinTol->setValue(40.0); extLay->addWidget(new QLabel("聚类容差:"), 1,0); extLay->addWidget(m_spinTol, 1,1);
-    m_spinMinSize = new QSpinBox(); m_spinMinSize->setMaximum(100000); m_spinMinSize->setValue(5000); extLay->addWidget(new QLabel("最小簇点数:"), 2,0); extLay->addWidget(m_spinMinSize, 2,1);
+    int r = 0;
+
+    // 共用参数: 包围盒
+    QHBoxLayout* minLay = new QHBoxLayout;
+    m_spinBoxMinX = new QDoubleSpinBox(); m_spinBoxMinX->setRange(-3000,3000); m_spinBoxMinX->setValue(-1200); m_spinBoxMinX->setDecimals(0);
+    m_spinBoxMinY = new QDoubleSpinBox(); m_spinBoxMinY->setRange(-3000,3000); m_spinBoxMinY->setValue(-460); m_spinBoxMinY->setDecimals(0);
+    m_spinBoxMinZ = new QDoubleSpinBox(); m_spinBoxMinZ->setRange(-3000,3000); m_spinBoxMinZ->setValue(-500); m_spinBoxMinZ->setDecimals(0);
+    minLay->addWidget(m_spinBoxMinX); minLay->addWidget(m_spinBoxMinY); minLay->addWidget(m_spinBoxMinZ);
+    extLay->addWidget(new QLabel("Box Min(X/Y/Z):"), r, 0); extLay->addLayout(minLay, r, 1); r++;
+
+    QHBoxLayout* maxLay = new QHBoxLayout;
+    m_spinBoxMaxX = new QDoubleSpinBox(); m_spinBoxMaxX->setRange(-3000,3000); m_spinBoxMaxX->setValue(600); m_spinBoxMaxX->setDecimals(0);
+    m_spinBoxMaxY = new QDoubleSpinBox(); m_spinBoxMaxY->setRange(-3000,3000); m_spinBoxMaxY->setValue(170); m_spinBoxMaxY->setDecimals(0);
+    m_spinBoxMaxZ = new QDoubleSpinBox(); m_spinBoxMaxZ->setRange(-3000,3000); m_spinBoxMaxZ->setValue(2100); m_spinBoxMaxZ->setDecimals(0);
+    maxLay->addWidget(m_spinBoxMaxX); maxLay->addWidget(m_spinBoxMaxY); maxLay->addWidget(m_spinBoxMaxZ);
+    extLay->addWidget(new QLabel("Box Max(X/Y/Z):"), r, 0); extLay->addLayout(maxLay, r, 1); r++;
+
+    // [新增] Z轴旋转
+    m_spinBoxRotZ = new QDoubleSpinBox(); m_spinBoxRotZ->setRange(-180, 180); m_spinBoxRotZ->setValue(33.0);
+    extLay->addWidget(new QLabel("Z轴旋转(度):"), r, 0); extLay->addWidget(m_spinBoxRotZ, r, 1); r++;
+
+    m_spinExtMinPts = new QSpinBox(); m_spinExtMinPts->setRange(100, 100000); m_spinExtMinPts->setValue(5000);
+    extLay->addWidget(new QLabel("最小簇点数:"), r, 0); extLay->addWidget(m_spinExtMinPts, r, 1); r++;
+
+    m_comboExtMethod = new QComboBox(); m_comboExtMethod->addItems({"欧式聚类", "区域生长"});
+    extLay->addWidget(new QLabel("聚类算法:"), r, 0); extLay->addWidget(m_comboExtMethod, r, 1); r++;
+
+    m_spinEuclideanTol = new QDoubleSpinBox(); m_spinEuclideanTol->setRange(1, 200); m_spinEuclideanTol->setValue(40.0);
+    extLay->addWidget(new QLabel("欧式容差(mm):"), r, 0); extLay->addWidget(m_spinEuclideanTol, r, 1); r++;
+
+    m_spinRgNeighbors = new QSpinBox(); m_spinRgNeighbors->setRange(5, 100); m_spinRgNeighbors->setValue(30);
+    extLay->addWidget(new QLabel("RG邻居数:"), r, 0); extLay->addWidget(m_spinRgNeighbors, r, 1); r++;
+
+    m_spinRgSmoothness = new QDoubleSpinBox(); m_spinRgSmoothness->setRange(1, 45); m_spinRgSmoothness->setValue(7.0);
+    extLay->addWidget(new QLabel("RG平滑度(度):"), r, 0); extLay->addWidget(m_spinRgSmoothness, r, 1); r++;
+
+    // [新增] RANSAC 面板
+    m_chkUseRansac = new QCheckBox("开启 RANSAC 剔除平面");
+    m_spinRansacDist = new QDoubleSpinBox(); m_spinRansacDist->setRange(1.0, 100.0); m_spinRansacDist->setValue(20.0); m_spinRansacDist->setEnabled(false);
+    connect(m_chkUseRansac, &QCheckBox::toggled, m_spinRansacDist, &QDoubleSpinBox::setEnabled);
+    QHBoxLayout* ransacLay = new QHBoxLayout; ransacLay->addWidget(m_chkUseRansac); ransacLay->addWidget(new QLabel("阈值:")); ransacLay->addWidget(m_spinRansacDist);
+    extLay->addLayout(ransacLay, r, 0, 1, 2); r++;
+
     colB->addWidget(grpExt);
+
+    // 在 initUI() 的 colB 布局中，测量参数组之前添加
+    QGroupBox *grpMls = new QGroupBox("3.5 MLS 平滑与上采样");
+    QGridLayout *mlsLay = new QGridLayout(grpMls);
+
+    m_chkUseMls = new QCheckBox("开启 MLS 上采样补孔");
+    m_chkUseMls->setChecked(true);
+    mlsLay->addWidget(m_chkUseMls, 0, 0, 1, 2);
+
+    m_spinMlsSearchRadius = new QDoubleSpinBox(); m_spinMlsSearchRadius->setRange(1, 500); m_spinMlsSearchRadius->setValue(80.0);
+    mlsLay->addWidget(new QLabel("搜索半径(mm):"), 1, 0); mlsLay->addWidget(m_spinMlsSearchRadius, 1, 1);
+
+    m_spinMlsUpsampleRadius = new QDoubleSpinBox(); m_spinMlsUpsampleRadius->setRange(1, 500); m_spinMlsUpsampleRadius->setValue(25.0);
+    mlsLay->addWidget(new QLabel("补孔半径(mm):"), 2, 0); mlsLay->addWidget(m_spinMlsUpsampleRadius, 2, 1);
+
+    m_spinMlsUpsampleStep = new QDoubleSpinBox(); m_spinMlsUpsampleStep->setRange(1, 100); m_spinMlsUpsampleStep->setValue(25.0);
+    mlsLay->addWidget(new QLabel("补孔步长(mm):"), 3, 0); mlsLay->addWidget(m_spinMlsUpsampleStep, 3, 1);
+
+    // 联动禁用
+    connect(m_chkUseMls, &QCheckBox::toggled, [this](bool checked){
+        m_spinMlsUpsampleRadius->setEnabled(checked);
+        m_spinMlsUpsampleStep->setEnabled(checked);
+    });
+
+    colB->addWidget(grpMls);
+
+
 
     QGroupBox *grpMeas = new QGroupBox("4. 测量参数");
     QGridLayout *measLay = new QGridLayout(grpMeas);
@@ -184,12 +272,18 @@ void BatchModePage::onBrowseOutput() {
 
 BatchParams BatchModePage::collectParams() {
     BatchParams p;
+
+    // 输入输出目录
     p.inputDir = m_leInput->text();
     p.outputDir = m_leOutput->text();
+
+    // 预处理参数
     p.leafSize = m_spinLeaf->value();
     p.stdDev = m_spinStd->value();
     p.meanK = m_spinMeanK->value();
     p.clipRadius = m_spinClip->value();
+
+    // 配准参数
     p.regMethod = m_comboRegAlgo->currentIndex();
     p.icpIter = m_spinIcpIter->value();
     p.icpDist = m_spinIcpDist->value();
@@ -199,9 +293,29 @@ BatchParams BatchModePage::collectParams() {
     p.gicpIter = m_spinGicpIter->value();
     p.gicpDist = m_spinGicpDist->value();
     p.gicpEps  = 1e-8; 
-    p.ransacThresh = m_spinRansac->value();
-    p.clusterTol = m_spinTol->value();
-    p.minClusterSize = m_spinMinSize->value();
+
+    // 主体提取参数
+    p.boxMinX = m_spinBoxMinX->value();
+    p.boxMinY = m_spinBoxMinY->value();
+    p.boxMinZ = m_spinBoxMinZ->value();
+    p.boxMaxX = m_spinBoxMaxX->value();
+    p.boxMaxY = m_spinBoxMaxY->value();
+    p.boxMaxZ = m_spinBoxMaxZ->value();
+    p.boxRotZ = m_spinBoxRotZ->value();
+    p.minClusterSize = m_spinExtMinPts->value();
+    p.extMethodIndex = m_comboExtMethod->currentIndex();
+    p.extEuclideanTol = m_spinEuclideanTol->value();
+    p.extRgNeighbors = m_spinRgNeighbors->value();
+    p.extRgSmoothness = m_spinRgSmoothness->value();
+    p.useRansac = m_chkUseRansac->isChecked();       // 新增
+    p.ransacDistThresh = m_spinRansacDist->value();  // 新增
+    p.onlyExtractBody = m_chkOnlyExtract->isChecked(); // 新增
+    p.useMlsUpsampling = m_chkUseMls->isChecked();
+    p.mlsSearchRadius = m_spinMlsSearchRadius->value();
+    p.mlsUpsamplingRadius = m_spinMlsUpsampleRadius->value();
+    p.mlsUpsamplingStep = m_spinMlsUpsampleStep->value();
+
+
     p.girthThick = m_spinGirthThick->value();
     p.skelStep = m_spinSkelStep->value();
     p.skelRadius = m_spinSkelRadius->value();
@@ -515,8 +629,27 @@ void BatchWorker::run() {
             mergedGeom->width = mergedGeom->size(); mergedGeom->height = 1;
 
             emit logMessage("提取猪只主体...", "ALGO");
-            PointCloudT::Ptr bodyCloud = PointCloudAlgo::extractLargestCluster(
-                mergedGeom, m_params.clusterTol, m_params.minClusterSize, m_params.ransacThresh);
+    
+            // [核心修复] 组装主体提取的全局参数
+            ExtractionParams extParams;
+            extParams.boxMinX = m_params.boxMinX; extParams.boxMinY = m_params.boxMinY; extParams.boxMinZ = m_params.boxMinZ;
+            extParams.boxMaxX = m_params.boxMaxX; extParams.boxMaxY = m_params.boxMaxY; extParams.boxMaxZ = m_params.boxMaxZ;
+            extParams.boxRotZ = m_params.boxRotZ;
+            extParams.minClusterSize = m_params.minClusterSize;
+            extParams.methodIndex = m_params.extMethodIndex;
+            extParams.euclideanTolerance = m_params.extEuclideanTol;
+            extParams.rgNeighbors = m_params.extRgNeighbors;
+            extParams.rgSmoothness = m_params.extRgSmoothness;
+            extParams.useRansac = m_params.useRansac;
+            extParams.ransacDistThresh = m_params.ransacDistThresh;
+            extParams.useMlsUpsampling = m_params.useMlsUpsampling;
+            extParams.mlsSearchRadius = m_params.mlsSearchRadius;
+            extParams.mlsUpsamplingRadius = m_params.mlsUpsamplingRadius;
+            extParams.mlsUpsamplingStep = m_params.mlsUpsamplingStep;
+
+            // [注意：此处日志回调可以传 nullptr，防止批处理期间大量日志刷屏]
+            PointCloudT::Ptr bodyCloud = PointCloudAlgo::extractLargestCluster(mergedGeom, extParams, nullptr);
+
             
             if (!bodyCloud || bodyCloud->empty()) {
                 emit logMessage("主体提取失败，跳过该文件夹。", "ERROR");
@@ -524,9 +657,33 @@ void BatchWorker::run() {
                 continue;
             }
 
+            // ==========================================================
+            // [新增功能] 如果用户勾选了“仅提取”，则在此处直接保存并跳到下一个文件夹
+            // ==========================================================
+            if (m_params.onlyExtractBody) {
+                QString pcdMerged = outPath + "/Merged_Cloud.pcd";
+                QString pcdBody   = outPath + "/Pig_Body.pcd";
+                pcl::io::savePCDFileBinary(pcdMerged.toStdString(), *mergedRGB);
+                pcl::io::savePCDFileBinary(pcdBody.toStdString(), *bodyCloud);
+                
+                emit logMessage(QString("[%1] 【仅提取模式】融合与主体点云已保存！").arg(folderName), "SUCCESS");
+                successCount++;
+                emit progressUpdated(i + 1, total);
+                continue; // 直接 Continue，跳过后面的 AI 预测和体尺测量
+            }
+            // ==========================================================
+
+
             emit logMessage("正在执行 AI 关键点预测...", "ALGO");
-            PointCloudT::Ptr backCloud = PointCloudAlgo::extractLargestCluster(
-                topProcessed, m_params.clusterTol, m_params.minClusterSize, 15.0);
+    
+            // [核心修复] 利用刚才的包围盒组装 backCloud 的提取参数
+            ExtractionParams backParams = extParams;
+            backParams.methodIndex = 0; // 强制用欧式聚类
+            backParams.euclideanTolerance = 50.0;
+            backParams.minClusterSize = 1000;
+            backParams.useRansac = false;
+            PointCloudT::Ptr backCloud = PointCloudAlgo::extractLargestCluster(topProcessed, backParams, nullptr);
+
             if(!backCloud) backCloud = topProcessed; 
 
             pcl::NormalEstimationOMP<PointT, pcl::PointNormal> ne;
@@ -713,10 +870,26 @@ void BatchWorker::run() {
 // 辅助方法：返回默认校准矩阵
 QMap<QString, Eigen::Matrix4d> BatchWorker::getDefaultTransforms() {
     QMap<QString, Eigen::Matrix4d> mats;
-    Eigen::Matrix4d lb; lb << 0.998144, 0.040452, 0.045531, 43.625172, 0.049100, -0.092113, -0.994537, 1393.481567, -0.036037, 0.994927, -0.093928, 2062.417725, 0, 0, 0, 1;
-    Eigen::Matrix4d lt; lt << 0.991525, 0.015493, 0.128988, -49.530918, 0.125268, 0.149176, -0.980844, 1446.867676, -0.034438, 0.988689, 0.145971, 1454.759033, 0, 0, 0, 1;
-    Eigen::Matrix4d rb; rb << -0.997376, 0.071718, 0.009833, 9.360316, 0.006674, -0.044152, 0.999003, -1420.248047, 0.072081, 0.996447, 0.043558, 1944.664185, 0, 0, 0, 1;
-    Eigen::Matrix4d rt; rt << -0.993564, 0.102217, 0.048803, 11.873594, 0.016009, -0.299805, 0.953866, -1409.841309, 0.112133, 0.948509, 0.296239, 1245.285522, 0, 0, 0, 1;
+    Eigen::Matrix4d lb; lb << 
+        -0.926086, -0.052355, -0.373662, 719.549438,
+        -0.368365, -0.088922, 0.925419, -1532.871094,
+        -0.081677, 0.994662, 0.063064, 1826.347290,
+        0.000000, 0.000000, 0.000000, 1.000000;
+    Eigen::Matrix4d lt; lt << 
+        -0.893402, 0.129827, -0.430091, 715.208496,
+        -0.431722, -0.512967, 0.741944, -1244.757813,
+        -0.124298, 0.848534, 0.514334, 853.710327,
+        0.000000, 0.000000, 0.000000, 1.000000;
+    Eigen::Matrix4d rb; rb << 
+        0.843684, 0.019195, 0.536497, -845.013184,
+        0.527601, -0.214250, -0.822030, 1084.744995,
+        0.099166, 0.976590, -0.190886, 2075.820557,
+        0.000000, 0.000000, 0.000000, 1.000000;
+    Eigen::Matrix4d rt; rt << 
+        0.881307, -0.310379, 0.356319, -767.480042,
+        0.451075, 0.327860, -0.830084, 1185.616089,
+        0.140818, 0.892285, 0.428950, 1194.222656,
+        0.000000, 0.000000, 0.000000, 1.000000;
     mats["LB"] = lb; mats["LT"] = lt; mats["RB"] = rb; mats["RT"] = rt;
     return mats;
 }

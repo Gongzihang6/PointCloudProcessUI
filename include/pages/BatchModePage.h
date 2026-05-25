@@ -4,6 +4,7 @@
 #include <QString>
 #include <QThread>
 #include <QMap>
+#include <QCheckBox>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <pcl/point_cloud.h>
@@ -17,7 +18,7 @@ class QSpinBox;
 class QProgressBar;
 class QTextEdit;
 class QPushButton;
-
+class QCheckBox;
 // ==========================================================
 // 1. 全局参数结构体：统一管理所有批处理参数
 // ==========================================================
@@ -48,9 +49,21 @@ struct BatchParams {
 
 
     // 主体提取参数
-    double ransacThresh = 20.0;
-    double clusterTol = 40.0;
+    float boxMinX = -1200.0f, boxMinY = -460.0f, boxMinZ = -500.0f;
+    float boxMaxX = 500.0f,  boxMaxY = 170.0f,  boxMaxZ = 2100.0f;
+    float boxRotZ = 33.0f;
     int minClusterSize = 5000;
+    int extMethodIndex = 0; // 0: 欧式, 1: 区域生长
+    double extEuclideanTol = 40.0;
+    int extRgNeighbors = 30;
+    double extRgSmoothness = 7.0;
+    bool useRansac = false;         // RANSAC 开关
+    double ransacDistThresh = 20.0; // RANSAC 阈值
+    bool onlyExtractBody = false;   // [新增功能] 仅提取主体模式开关
+    bool useMlsUpsampling = true;
+    double mlsSearchRadius = 80.0;
+    double mlsUpsamplingRadius = 25.0;
+    double mlsUpsamplingStep = 25.0;
 
     // 测量参数
     float girthThick = 10.0f;
@@ -134,10 +147,22 @@ private:
     QDoubleSpinBox *m_spinGicpDist;
     QSpinBox       *m_spinGicpIter;
 
-    // 主体提取（欧式聚类）参数控件
-    QDoubleSpinBox *m_spinRansac;
-    QDoubleSpinBox *m_spinTol;
-    QSpinBox       *m_spinMinSize;
+    // 主体提取参数控件
+    QDoubleSpinBox *m_spinBoxMinX, *m_spinBoxMinY, *m_spinBoxMinZ;
+    QDoubleSpinBox *m_spinBoxMaxX, *m_spinBoxMaxY, *m_spinBoxMaxZ;
+    QDoubleSpinBox *m_spinBoxRotZ;     // [新增]
+    QSpinBox       *m_spinExtMinPts;
+    QComboBox      *m_comboExtMethod;
+    QDoubleSpinBox *m_spinEuclideanTol;
+    QSpinBox       *m_spinRgNeighbors;
+    QDoubleSpinBox *m_spinRgSmoothness;
+    QCheckBox      *m_chkUseRansac;    // [新增]
+    QDoubleSpinBox *m_spinRansacDist;  // [新增]
+    QCheckBox      *m_chkOnlyExtract;  // [新增功能] 模式选择框
+    QCheckBox *m_chkUseMls;
+    QDoubleSpinBox *m_spinMlsSearchRadius;
+    QDoubleSpinBox *m_spinMlsUpsampleRadius;
+    QDoubleSpinBox *m_spinMlsUpsampleStep;
 
     // 体尺测量参数控件
     QDoubleSpinBox *m_spinGirthThick;
