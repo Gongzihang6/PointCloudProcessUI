@@ -1,3 +1,5 @@
 build/
+build_ninja/
+.dbg/
 *.pcd
 *.txt

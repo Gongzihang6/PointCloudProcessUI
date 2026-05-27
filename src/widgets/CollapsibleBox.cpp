@@ -1,3 +1,12 @@
+/*
+ * 文件说明：
+ * 该文件实现可折叠容器 `CollapsibleBox`，用于右侧参数面板的分组展示。
+ *
+ * 本次改动重点：
+ * 1. 保持折叠动画能力不变；
+ * 2. 关闭内容区域内部滚动条，统一交由外层右侧总滚动区域负责滚动；
+ * 3. 减少子模块内部二次滚动带来的交互冲突。
+ */
 #include "widgets/CollapsibleBox.h"
 #include <QPropertyAnimation>
 #include <QLayout> // 必须包含
@@ -20,8 +29,8 @@ CollapsibleBox::CollapsibleBox(const QString &title, QWidget *parent) : QWidget(
     contentArea->setFrameShape(QFrame::NoFrame);
     // [关键] 关闭水平滚动条，防止意外出现
     contentArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); 
-    // [关键] 垂直滚动条按需显示（如果高度计算正确，它就不会出现）
-    contentArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // 右侧已经有总滚动区域，这里强制关闭内部滚动，避免出现二次滚动体验。
+    contentArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     toggleAnimation = new QParallelAnimationGroup(this);
     auto *animation = new QPropertyAnimation(contentArea, "maximumHeight");

@@ -13,6 +13,11 @@ set(CMAKE_PREFIX_PATH "F:/dev/Qt/6.9.3/msvc2022_64")
 # 2. [核心修复] 查找库时，必须加上 OpenGLWidgets
 find_package(Qt6 COMPONENTS Widgets Gui Core OpenGLWidgets Network Concurrent REQUIRED)
 
+set(VTK_QT_DIR "F:/dev/vcpkg/packages/vtk_x64-windows")
+set(VCPKG_RUNTIME_DIR "F:/dev/vcpkg/installed/x64-windows/bin")
+include_directories("${VTK_QT_DIR}/include/vtk-9.3")
+link_directories("${VTK_QT_DIR}/lib")
+
 # opencv
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 message(STATUS "Found OpenCV version: ${OpenCV_VERSION}")
@@ -55,6 +60,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Network
     Qt6::Concurrent
     ${OpenCV_LIBS}
+    vtkGUISupportQt-9.3
+    vtkRenderingQt-9.3
     ${PCL_LIBRARIES}
     ${ONNXRUNTIME_DIR}/lib/onnxruntime.lib
 )
@@ -68,5 +75,34 @@ add_custom_command(TARGET PointCloudProcessUI POST_BUILD
     $<TARGET_FILE_DIR:PointCloudProcessUI>
 )
 
+file(GLOB VTK_QT_RUNTIME_DLLS "${VTK_QT_DIR}/bin/vtk*.dll")
+add_custom_command(TARGET PointCloudProcessUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${VTK_QT_RUNTIME_DLLS}
+    $<TARGET_FILE_DIR:PointCloudProcessUI>
+)
+
+file(GLOB VTK_QT_RUNTIME_SUPPORT_DLLS "${VTK_QT_DIR}/tools/vtk/*.dll")
+add_custom_command(TARGET PointCloudProcessUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${VTK_QT_RUNTIME_SUPPORT_DLLS}
+    $<TARGET_FILE_DIR:PointCloudProcessUI>
+)
+
+file(GLOB VCPKG_RUNTIME_DLLS "${VCPKG_RUNTIME_DIR}/*.dll")
+add_custom_command(TARGET PointCloudProcessUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${VCPKG_RUNTIME_DLLS}
+    $<TARGET_FILE_DIR:PointCloudProcessUI>
+)
+
+file(GLOB VCPKG_PACKAGE_RUNTIME_DLLS "F:/dev/vcpkg/packages/*_x64-windows/bin/*.dll")
+add_custom_command(TARGET PointCloudProcessUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${VCPKG_PACKAGE_RUNTIME_DLLS}
+    $<TARGET_FILE_DIR:PointCloudProcessUI>
+)
+
 # cmake --build . --config release --parallel 8
 # F:\dev\Qt\6.9.3\msvc2022_64\bin\windeployqt.exe --release --force "F:\Gongzihang\2026\PointCloudProcessUI\build\Release\PointCloudProcessUI.exe"
+# F:\Gongzihang\2026\PointCloudProcessUI\build\Release\PointCloudProcessUI.exe

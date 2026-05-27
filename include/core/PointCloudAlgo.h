@@ -1,188 +1,46 @@
+/*
+ * 文件说明：
+ * 该文件声明统一的点云算法入口类 `PointCloudAlgo`。
+ *
+ * 重构说明：
+ * 1. 保持原有 `core/PointCloudAlgo.h` 对外包含路径与 `PointCloudAlgo` 静态接口不变；
+ * 2. 将公共类型拆分到 `PointCloudAlgoTypes.h`，将模板实现拆分到 `PointCloudAlgoSmoothing.tpp`；
+ * 3. 让主头文件聚焦算法接口声明，降低页面与批处理模块阅读时的认知负担。
+ */
 #pragma once
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
+
+#include <functional>
+#include <utility>
+#include <vector>
+
 #include <Eigen/Dense>
-#include <pcl/common/transforms.h> 
-#include <pcl/registration/icp.h>
-#include <pcl/registration/icp_nl.h> // 点到面通常是非线性的，或者用 WithNormals
-#include <pcl/features/normal_3d_omp.h> // OMP 加速法线计算
-#include <pcl/registration/gicp.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/common/transforms.h>  // 用于 pcl::transformPointCloud
-#include <pcl/segmentation/extract_clusters.h>
-#include <pcl/search/kdtree.h>
-#include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/filters/extract_indices.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/surface/mls.h>
-#include <pcl/common/pca.h>
-#include <pcl/common/common.h>
-#include <pcl/sample_consensus/sac_model_plane.h>
-#include <pcl/registration/ndt.h>
-#include <pcl/filters/crop_box.h>
-#include <pcl/segmentation/region_growing.h>
-#include <algorithm>
-#include <cmath>
 
-#include <functional> // 用于 std::function
-#include <QString>
-#include <QFile>
-#include <QByteArray>
-#include <QMap>
-#include <opencv2/opencv.hpp>
-// 定义常用点云类型
-using PointT = pcl::PointXYZ;
-using PointCloudT = pcl::PointCloud<PointT>;
-
-// 定义带法线的点云类型 (用于点到面 ICP)
-using PointNormalT = pcl::PointNormal;
-using PointCloudNormalT = pcl::PointCloud<PointNormalT>;
-
-// [新增] 传感器类型枚举
-enum class SensorType {
-    COLOR,
-    DEPTH
-};
-// [新增] 相机外参 (Extrinsics: Depth to Color)
-struct CameraExtrinsics {
-    float R[9]; // 3x3 旋转矩阵
-    float T[3]; // 1x3 平移向量 (单位: mm)
-};
-// 定义一个结构体来存储相机内参，用于深度图转点云时使用
-struct CameraIntrinsics {
-    int width, height;
-    float fx, fy, cx, cy;
-    float k1, k2, k3, k4, k5, k6;
-    float p1, p2;
-};
-// [新增] 描述单台设备所有参数的数据包
-struct CameraDeviceParams {
-    QString roleName;     // 视角代号: Top, LB, LT, RB, RT
-    QString serialNumber; // 物理序列号: CL8NB...
-    
-    CameraExtrinsics extrinsics; // 相机外参
-    
-    // 内参字典 (Key 格式如: "1920x1080" 或 "1024x1024")
-    QMap<QString, CameraIntrinsics> colorIntrinsics; 
-    QMap<QString, CameraIntrinsics> depthIntrinsics; 
-};
-// 封装体尺计算相关数据
-struct BodySizeResults {
-    // 1. 数值结果
-    double body_length = 0.0;
-    double body_height = 0.0;
-    double body_width = 0.0;
-    double chest_girth = 0.0;
-    double waist_girth = 0.0;
-    double hip_girth = 0.0;
-
-    // 2. 变换后的数据 (供可视化用)
-    PointCloudT::Ptr aligned_cloud;        // PCA对齐后的完整/主体点云
-    std::vector<PointT> aligned_keypoints; // PCA对齐后的6个关键点
-    PointCloudT::Ptr skeleton_cloud;       // 骨架点云
-
-    // 3. 测量线/轮廓的端点图元 (供画线用)
-    PointT height_top, height_bottom;      // 体高线段端点
-    PointT width_p1, width_p2;             // 体宽线段端点
-    PointCloudT::Ptr chest_contour;        // 胸围轮廓线
-    PointCloudT::Ptr waist_contour;        // 腰围轮廓线
-    PointCloudT::Ptr hip_contour;          // 臀围轮廓线
-    PointCloudT::Ptr ground_polygon;       // 地面表示多边形 (4个顶点)
-};
-
-
-// 辅助结构体，用于周长计算时的极坐标点排序
-struct PolarPoint {
-    float r; // 半径
-    float theta; // 角度 (弧度)
-    bool operator < (const PolarPoint& other) const {
-        return theta < other.theta;
-    }
-};
-
-
-// [新增] 主体提取参数结构体
-struct ExtractionParams {
-    // 1. 共用参数：包围盒 (CropBox)
-    float boxMinX = -1200.0f, boxMinY = -460.0f, boxMinZ = -500.0f;
-    float boxMaxX = 600.0f,  boxMaxY = 170.0f,  boxMaxZ = 2100.0f;
-    int minClusterSize = 5000;
-
-    // 2. 算法选择 (0: 欧式聚类, 1: 区域生长)
-    int methodIndex = 0; 
-
-    // 3. 欧式聚类专属参数
-    double euclideanTolerance = 40.0; // mm
-
-    // 4. 区域生长专属参数
-    int rgNeighbors = 30;
-    double rgSmoothness = 7.0; // 角度 (度)
-    double rgCurvature = 1.0;
-
-    // [新增] 包围盒绕 Z 轴的旋转角度 (度)
-    float boxRotZ = 33.0f;
-
-    // ==========================================
-    // [新增] RANSAC 平面剔除参数
-    // ==========================================
-    bool useRansac = true;         // 是否开启二次平面剔除
-    double ransacDistThresh = 30.0; // RANSAC 距离阈值 (mm)
-
-    double ransacAngleThresh = 10.0;
-
-    // ==========================================
-    // [新增] MLS 平滑与上采样参数
-    // ==========================================
-    bool useMlsUpsampling = true;         // 是否开启上采样补孔
-    double mlsSearchRadius = 80.0;        // MLS 搜索半径 (决定平滑和跨越孔洞的范围)
-    double mlsUpsamplingRadius = 25.0;    // 补孔半径 (建议略小于搜索半径)
-    double mlsUpsamplingStep = 25.0;      // 补孔生成点步长 (越小点越密)
-};
+#include "core/point_cloud_algo/PointCloudAlgoTypes.h"
 
 class PointCloudAlgo {
 public:
-    // 定义枚举，让代码更具可读性
+    // 定义枚举，让代码更具可读性。
     enum RegistrationMethod {
-        P2Point = 0, // 点到点
-        P2Plane = 1  // 点到面
+        P2Point = 0,
+        P2Plane = 1
     };
 
-    /**
-     * @brief 体素下采样 (Voxel Grid Filter)
-     * @param cloud_in 输入点云
-     * @param leaf_size_mm 体素大小 (单位: 毫米)
-     * @return 下采样后的新点云
-     */
+    // 点云预处理相关接口。
     static PointCloudT::Ptr downsample(PointCloudT::Ptr cloud_in, float leaf_size_mm);
-
-    // 2. 统计离群点移除 (SOR)
     static PointCloudT::Ptr statisticalOutlierRemoval(PointCloudT::Ptr cloud_in, int mean_k, double std_dev_mul);
-
-    // 3. 半径/距离裁剪 (保留原点距离小于 radius 的点)
     static PointCloudT::Ptr distanceClip(PointCloudT::Ptr cloud_in, float radius_mm);
-
-    // 4. 应用 4x4 变换矩阵
     static PointCloudT::Ptr transformCloud(PointCloudT::Ptr cloud_in, const Eigen::Matrix4d& matrix);
 
-    // 5. ICP 配准 (返回变换后的点云 + 最终的变换矩阵)
-    // cloud_source: 待配准点云
-    // cloud_target: 目标点云 (Top)
-    // init_guess: 初始变换矩阵 (通常是手动输入那个)
-    // max_iter: 最大迭代次数
-    // dist_thresh: 对应点距离阈值
-    // 增加 logger 参数，默认为 nullptr (不传就不打印，兼容性好)
+    // 点云配准相关接口。
     static std::pair<PointCloudT::Ptr, Eigen::Matrix4d> alignICP(
-        PointCloudT::Ptr cloud_source, 
-        PointCloudT::Ptr cloud_target, 
+        PointCloudT::Ptr cloud_source,
+        PointCloudT::Ptr cloud_target,
         const Eigen::Matrix4d& init_guess,
         int max_iter = 50,
         double dist_thresh = 0.05,
-        int method = 0,     // 0: P2Point, 1: P2Plane
-        std::function<void(const QString&, const QString&)> logger = nullptr
-    );
+        int method = 0,
+        std::function<void(const QString&, const QString&)> logger = nullptr);
 
-    // NDT 配准 (正态分布变换，适合大规模点云)
     static Eigen::Matrix4f refineRegistrationNDT(
         const PointCloudT::Ptr& source_cloud,
         const PointCloudT::Ptr& target_cloud,
@@ -192,7 +50,6 @@ public:
         int max_iter,
         std::function<void(const QString&, const QString&)> logger = nullptr);
 
-    // [新增] G-ICP 配准函数声明
     static std::pair<PointCloudT::Ptr, Eigen::Matrix4d> alignGICP(
         const PointCloudT::Ptr& source_cloud,
         const PointCloudT::Ptr& target_cloud,
@@ -202,47 +59,44 @@ public:
         double transformation_epsilon,
         std::function<void(const QString&, const QString&)> logger = nullptr);
 
-
-    // 6. 提取最大连通主体 (欧式聚类)
+    // 主体提取相关接口。
     static PointCloudT::Ptr extractLargestCluster(
-        PointCloudT::Ptr input_cloud, 
+        PointCloudT::Ptr input_cloud,
         const ExtractionParams& params,
         std::function<void(const QString&, const QString&)> logger = nullptr);
 
-
-    // 整合的体尺计算主干函数
+    // 体尺测量相关接口。
     static BodySizeResults calculateAllMeasurements(
-        PointCloudT::Ptr cloud_body,    // 干净的主体点云
-        PointCloudT::Ptr cloud_merged,  // 包含地面的融合点云
+        PointCloudT::Ptr cloud_body,
+        PointCloudT::Ptr cloud_merged,
         const std::vector<Eigen::Vector3f>& keypoints_eigen,
-        float girth_thick, 
-        float skel_step, 
-        float skel_radius, 
+        float girth_thick,
+        float skel_step,
+        float skel_radius,
         float height_angle,
         std::function<void(const QString&, const QString&)> logger = nullptr);
 
-    // [新增] 从 16-bit RAW 深度图转换为点云
+    // 深度图与相机参数相关接口。
     static PointCloudT::Ptr convertRawDepthToPointCloud(
-        const QString& rawFilePath, 
+        const QString& rawFilePath,
         const CameraIntrinsics& intr);
 
-    // [新增] 获取某一台相机的【全套】物理参数
     static CameraDeviceParams getCameraParams(const QString& camKey);
-    // [新增] 便捷函数：直接获取特定类型、特定分辨率下的内参
     static CameraIntrinsics getCameraIntrinsics(const QString& camKey, SensorType type, int width, int height);
 
-    template<typename PointT>
-    static typename pcl::PointCloud<PointT>::Ptr applyTaubinSmoothing(
-        const typename pcl::PointCloud<PointT>::ConstPtr& cloud_in,
+    template<typename TPoint>
+    static typename pcl::PointCloud<TPoint>::Ptr applyTaubinSmoothing(
+        const typename pcl::PointCloud<TPoint>::ConstPtr& cloud_in,
         int num_iterations,
         double lambda,
         double mu,
-        int k_neighbors=20);
+        int k_neighbors = 20);
 
 private:
-    // 内部辅助函数：将点云转换为带法线的点云 (用于点到面 ICP)
+    // 配准内部辅助函数。
     static PointCloudNormalT::Ptr computeNormals(PointCloudT::Ptr cloud_in, double radius);
 
+    // 测量内部辅助函数。
     static Eigen::Affine3f pca_transform(PointCloudT::Ptr cloud_in, PointCloudT::Ptr& cloud_out, const std::vector<PointT>& kps);
     static PointCloudT::Ptr compute_surface_back_skeleton(const PointCloudT::Ptr& cloud, const std::vector<PointT>& kps, float step, float radius, int smooth_win);
     static double calculate_body_length(const PointCloudT::Ptr& skel);
@@ -259,5 +113,4 @@ private:
     static std::pair<PointT, Eigen::Vector3f> get_skeleton_tangent_at_keypoint(const PointT& keypoint, const PointCloudT::Ptr& skeleton_cloud);
 };
 
-
-
+#include "core/point_cloud_algo/PointCloudAlgoSmoothing.tpp"
